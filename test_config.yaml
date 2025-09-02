@@ -1,0 +1,38 @@
+default_rule:
+  execute:
+  - authenticator: test_authenticator
+  - authorizer: test_authorizer
+  - finalizer: noop
+log:
+  level: info
+management:
+  host: 127.0.0.1
+  port: 8081
+  tls:
+    cert_file: test_cert.pem
+    key_file: test_key.pem
+mechanisms:
+  authenticators:
+  - id: test_authenticator
+    type: unauthorized
+  - id: anonymous_authenticator
+    type: anonymous
+  authorizers:
+  - id: test_authorizer
+    type: allow
+  - id: allow_all_authorizer
+    type: allow
+  finalizers:
+  - config:
+      headers:
+        X-Test: grading
+    id: noop
+    type: header
+metrics:
+  enabled: true
+serve:
+  host: 127.0.0.1
+  port: 8080
+  tls:
+    cert_file: test_cert.pem
+    key_file: test_key.pem
