@@ -15,7 +15,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 package management
-
+// To trigger-ci
 const (
 	EndpointHealth = "/.well-known/health"
 	EndpointJWKS   = "/.well-known/jwks"
