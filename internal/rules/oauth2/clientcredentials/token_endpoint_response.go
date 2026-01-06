@@ -78,18 +78,9 @@ func (e *TokenErrorResponse) Error() string {
 	return builder.String()
 }
 
-type TokenEndpointResponse struct {
+type TokenEndpointResponse struct { //nolint:errname
 	*TokenInfoResponse
 	*TokenErrorResponse
-}
-
-func (r TokenEndpointResponse) error() error {
-	// weird go behavior
-	if r.TokenErrorResponse != nil {
-		return r.TokenErrorResponse
-	}
-
-	return nil
 }
 
 func (r TokenEndpointResponse) TokenInfo() (*TokenInfo, error) {
@@ -109,4 +100,13 @@ func (r TokenEndpointResponse) TokenInfo() (*TokenInfo, error) {
 		Expiry:       expiry,
 		Scopes:       strings.Split(r.Scope, " "),
 	}, nil
+}
+
+func (r TokenEndpointResponse) error() error {
+	// weird go behavior
+	if r.TokenErrorResponse != nil {
+		return r.TokenErrorResponse
+	}
+
+	return nil
 }

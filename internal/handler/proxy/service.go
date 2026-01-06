@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/ccoveille/go-safecast"
 	"github.com/justinas/alice"
 	"github.com/rs/cors"
 	"github.com/rs/zerolog"
@@ -41,7 +42,6 @@ import (
 	"github.com/dadrus/heimdall/internal/handler/middleware/http/recovery"
 	"github.com/dadrus/heimdall/internal/handler/middleware/http/trustedproxy"
 	"github.com/dadrus/heimdall/internal/handler/service"
-	"github.com/dadrus/heimdall/internal/heimdall"
 	"github.com/dadrus/heimdall/internal/rules/rule"
 	"github.com/dadrus/heimdall/internal/x"
 	"github.com/dadrus/heimdall/internal/x/httpx"
@@ -86,17 +86,15 @@ func newService(
 	cch cache.Cache,
 	log zerolog.Logger,
 	exec rule.Executor,
-	signer heimdall.JWTSigner,
 ) *http.Server {
 	der := &deadlineResetter{}
-	cfg := conf.Serve.Proxy
+	cfg := conf.Serve
 	eh := errorhandler.New(
 		errorhandler.WithVerboseErrors(cfg.Respond.Verbose),
 		errorhandler.WithPreconditionErrorCode(cfg.Respond.With.ArgumentError.Code),
 		errorhandler.WithAuthenticationErrorCode(cfg.Respond.With.AuthenticationError.Code),
 		errorhandler.WithAuthorizationErrorCode(cfg.Respond.With.AuthorizationError.Code),
 		errorhandler.WithCommunicationErrorCode(cfg.Respond.With.CommunicationError.Code),
-		errorhandler.WithMethodErrorCode(cfg.Respond.With.BadMethodError.Code),
 		errorhandler.WithNoRuleErrorCode(cfg.Respond.With.NoRuleError.Code),
 		errorhandler.WithInternalServerErrorCode(cfg.Respond.With.InternalError.Code),
 	)
@@ -104,15 +102,8 @@ func newService(
 	hc := alice.New(
 		trustedproxy.New(
 			log,
-			x.IfThenElseExec(cfg.TrustedProxies != nil,
-				func() []string { return *cfg.TrustedProxies },
-				func() []string { return []string{} },
-			)...,
+			cfg.TrustedProxies...,
 		),
-		accesslog.New(log),
-		logger.New(log),
-		dump.New(),
-		der.handler,
 		recovery.New(eh),
 		otelhttp.NewMiddleware("",
 			otelhttp.WithServerName(cfg.Address()),
@@ -125,6 +116,10 @@ func newService(
 			otelmetrics.WithSubsystem("proxy"),
 			otelmetrics.WithServerName(cfg.Address()),
 		),
+		accesslog.New(log),
+		logger.New(log),
+		dump.New(),
+		der.handler,
 		x.IfThenElseExec(cfg.CORS != nil,
 			func() func(http.Handler) http.Handler {
 				return cors.New(
@@ -141,14 +136,14 @@ func newService(
 			func() func(http.Handler) http.Handler { return passthrough.New },
 		),
 		cachemiddleware.New(cch),
-	).Then(service.NewHandler(newContextFactory(signer, cfg, tlsClientConfig), exec, eh))
+	).Then(service.NewHandler(newContextFactory(cfg, tlsClientConfig), exec, eh))
 
 	return &http.Server{
 		Handler:        hc,
 		ReadTimeout:    cfg.Timeout.Read,
 		WriteTimeout:   cfg.Timeout.Write,
 		IdleTimeout:    cfg.Timeout.Idle,
-		MaxHeaderBytes: int(cfg.BufferLimit.Read),
+		MaxHeaderBytes: safecast.MustConvert[int](uint64(cfg.BufferLimit.Read)),
 		ErrorLog:       loggeradapter.NewStdLogger(log),
 		ConnContext:    der.contexter,
 	}

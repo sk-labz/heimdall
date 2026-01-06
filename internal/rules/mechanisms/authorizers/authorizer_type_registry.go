@@ -20,6 +20,7 @@ import (
 	"errors"
 	"sync"
 
+	"github.com/dadrus/heimdall/internal/app"
 	"github.com/dadrus/heimdall/internal/x/errorchain"
 )
 
@@ -27,13 +28,13 @@ var (
 	ErrUnsupportedAuthorizerType = errors.New("authorizer type unsupported")
 
 	// by intention. Used only during application bootstrap.
-	authorizerTypeFactories   []AuthorizerTypeFactory //nolint:gochecknoglobals
-	authorizerTypeFactoriesMu sync.RWMutex            //nolint:gochecknoglobals
+	authorizerTypeFactories   []TypeFactory //nolint:gochecknoglobals
+	authorizerTypeFactoriesMu sync.RWMutex  //nolint:gochecknoglobals
 )
 
-type AuthorizerTypeFactory func(id string, typ string, config map[string]any) (bool, Authorizer, error)
+type TypeFactory func(app app.Context, id string, typ string, config map[string]any) (bool, Authorizer, error)
 
-func registerTypeFactory(factory AuthorizerTypeFactory) {
+func registerTypeFactory(factory TypeFactory) {
 	authorizerTypeFactoriesMu.Lock()
 	defer authorizerTypeFactoriesMu.Unlock()
 
@@ -44,12 +45,12 @@ func registerTypeFactory(factory AuthorizerTypeFactory) {
 	authorizerTypeFactories = append(authorizerTypeFactories, factory)
 }
 
-func CreatePrototype(id string, typ string, config map[string]any) (Authorizer, error) {
+func CreatePrototype(app app.Context, id string, typ string, config map[string]any) (Authorizer, error) {
 	authorizerTypeFactoriesMu.RLock()
 	defer authorizerTypeFactoriesMu.RUnlock()
 
 	for _, create := range authorizerTypeFactories {
-		if ok, at, err := create(id, typ, config); ok {
+		if ok, at, err := create(app, id, typ, config); ok {
 			return at, err
 		}
 	}

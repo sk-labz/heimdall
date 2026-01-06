@@ -17,83 +17,44 @@
 package errorhandlers
 
 import (
-	"context"
 	"net/http"
 	"net/url"
 	"testing"
 
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/dadrus/heimdall/internal/app"
+	"github.com/dadrus/heimdall/internal/config"
 	"github.com/dadrus/heimdall/internal/heimdall"
 	"github.com/dadrus/heimdall/internal/heimdall/mocks"
+	"github.com/dadrus/heimdall/internal/validation"
 	"github.com/dadrus/heimdall/internal/x/testsupport"
 )
 
 func TestCreateRedirectErrorHandler(t *testing.T) {
 	t.Parallel()
 
-	for _, tc := range []struct {
-		uc     string
-		config []byte
-		assert func(t *testing.T, err error, redEH *redirectErrorHandler)
+	for uc, tc := range map[string]struct {
+		enforceTLS bool
+		config     []byte
+		assert     func(t *testing.T, err error, redEH *redirectErrorHandler)
 	}{
-		{
-			uc:     "configuration without required 'To' parameter",
+		"configuration without required 'to' parameter": {
 			config: []byte(`code: 302`),
 			assert: func(t *testing.T, err error, _ *redirectErrorHandler) {
 				t.Helper()
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrConfiguration)
-				assert.Contains(t, err.Error(), "'to' is a required field")
+				require.ErrorContains(t, err, "'to' is a required field")
 			},
 		},
-		{
-			uc:     "configuration without required 'if' parameter",
-			config: []byte(`to: http://foo.bar`),
-			assert: func(t *testing.T, err error, _ *redirectErrorHandler) {
-				t.Helper()
-
-				require.Error(t, err)
-				require.ErrorIs(t, err, heimdall.ErrConfiguration)
-				assert.Contains(t, err.Error(), "'if' is a required field")
-			},
-		},
-		{
-			uc: "with empty 'if' configuration",
+		"with unexpected fields in configuration": {
 			config: []byte(`
 to: http://foo.bar
-if: ""
-`),
-			assert: func(t *testing.T, err error, _ *redirectErrorHandler) {
-				t.Helper()
-
-				require.Error(t, err)
-				require.ErrorIs(t, err, heimdall.ErrConfiguration)
-				assert.Contains(t, err.Error(), "'if' is a required field")
-			},
-		},
-		{
-			uc: "with invalid 'if' conditions configuration",
-			config: []byte(`
-to: http://foo.bar
-if: foo
-`),
-			assert: func(t *testing.T, err error, _ *redirectErrorHandler) {
-				t.Helper()
-
-				require.Error(t, err)
-				require.ErrorIs(t, err, heimdall.ErrConfiguration)
-				assert.Contains(t, err.Error(), "failed to compile")
-			},
-		},
-		{
-			uc: "with unexpected fields in configuration",
-			config: []byte(`
-to: http://foo.bar
-bar: foo
 if: true == false
 `),
 			assert: func(t *testing.T, err error, _ *redirectErrorHandler) {
@@ -101,36 +62,42 @@ if: true == false
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrConfiguration)
-				assert.Contains(t, err.Error(), "failed decoding")
+				require.ErrorContains(t, err, "failed decoding")
 			},
 		},
-		{
-			uc: "with minimal valid configuration",
-			config: []byte(`
-to: http://foo.bar
-if: Error.Source == "foo"
-`),
+		"with minimal valid configuration, enforced and used TLS": {
+			enforceTLS: true,
+			config:     []byte(`to: https://foo.bar`),
 			assert: func(t *testing.T, err error, redEH *redirectErrorHandler) {
 				t.Helper()
 
 				require.NoError(t, err)
 				require.NotNil(t, redEH)
-				assert.Equal(t, "with minimal valid configuration", redEH.ID())
+				assert.Equal(t, "with minimal valid configuration, enforced and used TLS", redEH.ID())
+				assert.Equal(t, redEH.Name(), redEH.ID())
 
 				toURL, err := redEH.to.Render(nil)
 				require.NoError(t, err)
 
-				assert.Equal(t, "http://foo.bar", toURL)
+				assert.Equal(t, "https://foo.bar", toURL)
 				assert.Equal(t, http.StatusFound, redEH.code)
-				assert.NotNil(t, redEH.c)
 			},
 		},
-		{
-			uc: "with full valid configuration",
+		"with minimal valid configuration, enforced but not used TLS": {
+			enforceTLS: true,
+			config:     []byte(`to: http://foo.bar`),
+			assert: func(t *testing.T, err error, _ *redirectErrorHandler) {
+				t.Helper()
+
+				require.Error(t, err)
+				require.ErrorIs(t, err, heimdall.ErrConfiguration)
+				require.Contains(t, err.Error(), "'to' scheme must be https")
+			},
+		},
+		"with full valid configuration": {
 			config: []byte(`
 to: http://foo.bar?origin={{ .Request.URL | urlenc }}
 code: 301
-if: type(Error) == authentication_error
 `),
 			assert: func(t *testing.T, err error, redEH *redirectErrorHandler) {
 				t.Helper()
@@ -138,10 +105,13 @@ if: type(Error) == authentication_error
 				require.NoError(t, err)
 				require.NotNil(t, redEH)
 				assert.Equal(t, "with full valid configuration", redEH.ID())
+				assert.Equal(t, redEH.Name(), redEH.ID())
 
-				ctx := mocks.NewContextMock(t)
+				ctx := mocks.NewRequestContextMock(t)
 				ctx.EXPECT().Request().
-					Return(&heimdall.Request{URL: &url.URL{Scheme: "http", Host: "foobar.baz", Path: "zab"}})
+					Return(&heimdall.Request{
+						URL: &heimdall.URL{URL: url.URL{Scheme: "http", Host: "foobar.baz", Path: "zab"}},
+					})
 
 				toURL, err := redEH.to.Render(map[string]any{
 					"Request": ctx.Request(),
@@ -150,16 +120,27 @@ if: type(Error) == authentication_error
 
 				assert.Equal(t, "http://foo.bar?origin=http%3A%2F%2Ffoobar.baz%2Fzab", toURL)
 				assert.Equal(t, http.StatusMovedPermanently, redEH.code)
-				assert.NotNil(t, redEH.c)
 			},
 		},
 	} {
-		t.Run("case="+tc.uc, func(t *testing.T) {
+		t.Run(uc, func(t *testing.T) {
+			// GIVEN
 			conf, err := testsupport.DecodeTestConfig(tc.config)
 			require.NoError(t, err)
 
+			es := config.EnforcementSettings{EnforceEgressTLS: tc.enforceTLS}
+			validator, err := validation.NewValidator(
+				validation.WithTagValidator(es),
+				validation.WithErrorTranslator(es),
+			)
+			require.NoError(t, err)
+
+			appCtx := app.NewContextMock(t)
+			appCtx.EXPECT().Validator().Maybe().Return(validator)
+			appCtx.EXPECT().Logger().Return(log.Logger)
+
 			// WHEN
-			errorHandler, err := newRedirectErrorHandler(tc.uc, conf)
+			errorHandler, err := newRedirectErrorHandler(appCtx, uc, conf)
 
 			// THEN
 			tc.assert(t, err, errorHandler)
@@ -170,109 +151,69 @@ if: type(Error) == authentication_error
 func TestCreateRedirectErrorHandlerFromPrototype(t *testing.T) {
 	t.Parallel()
 
-	for _, tc := range []struct {
-		uc              string
+	for uc, tc := range map[string]struct {
 		prototypeConfig []byte
 		config          []byte
+		stepID          string
 		assert          func(t *testing.T, err error, prototype *redirectErrorHandler, configured *redirectErrorHandler)
 	}{
-		{
-			uc: "no new configuration provided",
-			prototypeConfig: []byte(`
-to: http://foo.bar
-if: type(Error) == authentication_error
-`),
+		"no new configuration and no step ID": {
+			prototypeConfig: []byte(`to: http://foo.bar`),
 			assert: func(t *testing.T, err error, prototype *redirectErrorHandler, configured *redirectErrorHandler) {
 				t.Helper()
 
 				require.NoError(t, err)
 				assert.Equal(t, prototype, configured)
-				assert.Equal(t, "no new configuration provided", configured.ID())
 			},
 		},
-		{
-			uc: "empty configuration provided",
-			prototypeConfig: []byte(`
-to: http://foo.bar
-if: type(Error) == authentication_error
-`),
-			config: []byte(``),
+		"no new configuration but with step ID": {
+			prototypeConfig: []byte(`to: http://foo.bar`),
+			stepID:          "foo",
 			assert: func(t *testing.T, err error, prototype *redirectErrorHandler, configured *redirectErrorHandler) {
 				t.Helper()
-
-				require.NoError(t, err)
-				assert.Equal(t, prototype, configured)
-				assert.Equal(t, "empty configuration provided", configured.ID())
-			},
-		},
-		{
-			uc: "unsupported fields provided",
-			prototypeConfig: []byte(`
-to: http://foo.bar
-if: type(Error) == authentication_error
-`),
-			config: []byte(`to: http://foo.bar`),
-			assert: func(t *testing.T, err error, _ *redirectErrorHandler, _ *redirectErrorHandler) {
-				t.Helper()
-
-				require.Error(t, err)
-				require.ErrorIs(t, err, heimdall.ErrConfiguration)
-				assert.Contains(t, err.Error(), "failed decoding")
-			},
-		},
-		{
-			uc: "invalid 'if' condition",
-			prototypeConfig: []byte(`
-to: http://foo.bar
-if: type(Error) == authentication_error
-`),
-			config: []byte(`if: foo`),
-			assert: func(t *testing.T, err error, _ *redirectErrorHandler, _ *redirectErrorHandler) {
-				t.Helper()
-
-				require.Error(t, err)
-				require.ErrorIs(t, err, heimdall.ErrConfiguration)
-				assert.Contains(t, err.Error(), "failed to compile")
-			},
-		},
-		{
-			uc: "required 'if' field provided",
-			prototypeConfig: []byte(`
-to: http://foo.bar
-code: 301
-if: type(Error) in [authentication_error, authorization_error] 
-`),
-			config: []byte(`if: type(Error) == precondition_error`),
-			assert: func(t *testing.T, err error, prototype *redirectErrorHandler, configured *redirectErrorHandler) {
-				t.Helper()
-
-				ctx := mocks.NewContextMock(t)
-				ctx.EXPECT().AppContext().Return(context.TODO())
-				ctx.EXPECT().Request().Return(nil)
 
 				require.NoError(t, err)
 				assert.NotEqual(t, prototype, configured)
-				assert.NotNil(t, configured)
-				assert.Equal(t, "required 'if' field provided", configured.ID())
-				assert.Equal(t, prototype.to, configured.to)
+				assert.Equal(t, "foo", configured.ID())
+				assert.Equal(t, prototype.Name(), configured.Name())
 				assert.Equal(t, prototype.code, configured.code)
-				assert.NotEqual(t, prototype.c, configured.c)
-				assert.True(t, configured.CanExecute(ctx, heimdall.ErrArgument))
+				assert.Equal(t, prototype.to, configured.to)
+			},
+		},
+		"unsupported configuration provided": {
+			prototypeConfig: []byte(`to: http://foo.bar`),
+			config:          []byte(`to: http://foo.bar`),
+			assert: func(t *testing.T, err error, _ *redirectErrorHandler, _ *redirectErrorHandler) {
+				t.Helper()
+
+				require.Error(t, err)
+				require.ErrorIs(t, err, heimdall.ErrConfiguration)
+				require.ErrorContains(t, err, "reconfiguration of a redirect error handler is not supported")
 			},
 		},
 	} {
-		t.Run("case="+tc.uc, func(t *testing.T) {
+		t.Run(uc, func(t *testing.T) {
+			// GIVEN
 			pc, err := testsupport.DecodeTestConfig(tc.prototypeConfig)
 			require.NoError(t, err)
 
 			conf, err := testsupport.DecodeTestConfig(tc.config)
 			require.NoError(t, err)
 
-			prototype, err := newRedirectErrorHandler(tc.uc, pc)
+			validator, err := validation.NewValidator(
+				validation.WithTagValidator(config.EnforcementSettings{}),
+			)
+			require.NoError(t, err)
+
+			appCtx := app.NewContextMock(t)
+			appCtx.EXPECT().Validator().Maybe().Return(validator)
+			appCtx.EXPECT().Logger().Return(log.Logger)
+
+			prototype, err := newRedirectErrorHandler(appCtx, uc, pc)
 			require.NoError(t, err)
 
 			// WHEN
-			errorHandler, err := prototype.WithConfig(conf)
+			errorHandler, err := prototype.WithConfig(tc.stepID, conf)
 
 			// THEN
 			var (
@@ -293,61 +234,32 @@ if: type(Error) in [authentication_error, authorization_error]
 func TestRedirectErrorHandlerExecute(t *testing.T) {
 	t.Parallel()
 
-	for _, tc := range []struct {
-		uc               string
+	for uc, tc := range map[string]struct {
 		config           []byte
 		error            error
-		configureContext func(t *testing.T, ctx *mocks.ContextMock)
-		assert           func(t *testing.T, wasResponsible bool, err error)
+		configureContext func(t *testing.T, ctx *mocks.RequestContextMock)
+		assert           func(t *testing.T, err error)
 	}{
-		{
-			uc: "not responsible for error",
-			config: []byte(`
-to: http://foo.bar
-if: type(Error) == authentication_error
-`),
-			error: heimdall.ErrInternal,
-			configureContext: func(t *testing.T, ctx *mocks.ContextMock) {
+		"with template rendering error": {
+			config: []byte(`to: http://foo.bar={{ len .foobar }}`),
+			error:  heimdall.ErrAuthentication,
+			configureContext: func(t *testing.T, ctx *mocks.RequestContextMock) {
 				t.Helper()
 
 				ctx.EXPECT().Request().Return(nil)
 			},
-			assert: func(t *testing.T, wasResponsible bool, err error) {
-				t.Helper()
-
-				require.NoError(t, err)
-				assert.False(t, wasResponsible)
-			},
-		},
-		{
-			uc: "responsible for error but with template rendering error",
-			config: []byte(`
-to: http://foo.bar={{ len .foobar }}
-if: type(Error) == authentication_error
-`),
-			error: heimdall.ErrAuthentication,
-			configureContext: func(t *testing.T, ctx *mocks.ContextMock) {
-				t.Helper()
-
-				ctx.EXPECT().Request().Return(nil)
-			},
-			assert: func(t *testing.T, wasResponsible bool, err error) {
+			assert: func(t *testing.T, err error) {
 				t.Helper()
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrInternal)
-				assert.Contains(t, err.Error(), "failed to render")
-				assert.True(t, wasResponsible)
+				require.ErrorContains(t, err, "failed to render")
 			},
 		},
-		{
-			uc: "responsible without return to url templating",
-			config: []byte(`
-to: http://foo.bar
-if: type(Error) == authentication_error
-`),
-			error: heimdall.ErrAuthentication,
-			configureContext: func(t *testing.T, ctx *mocks.ContextMock) {
+		"without return to url templating": {
+			config: []byte(`to: http://foo.bar`),
+			error:  heimdall.ErrAuthentication,
+			configureContext: func(t *testing.T, ctx *mocks.RequestContextMock) {
 				t.Helper()
 
 				ctx.EXPECT().Request().Return(nil)
@@ -361,28 +273,25 @@ if: type(Error) == authentication_error
 					return true
 				}))
 			},
-			assert: func(t *testing.T, wasResponsible bool, err error) {
+			assert: func(t *testing.T, err error) {
 				t.Helper()
 
 				require.NoError(t, err)
-				assert.True(t, wasResponsible)
 			},
 		},
-		{
-			uc: "responsible with template and code set",
+		"with template and code set": {
 			config: []byte(`
 to: http://foo.bar?origin={{ .Request.URL | urlenc }}
 code: 300
-if: type(Error) == authentication_error
 `),
 			error: heimdall.ErrAuthentication,
-			configureContext: func(t *testing.T, ctx *mocks.ContextMock) {
+			configureContext: func(t *testing.T, ctx *mocks.RequestContextMock) {
 				t.Helper()
 
 				requestURL, err := url.Parse("http://test.org")
 				require.NoError(t, err)
 
-				ctx.EXPECT().Request().Return(&heimdall.Request{URL: requestURL})
+				ctx.EXPECT().Request().Return(&heimdall.Request{URL: &heimdall.URL{URL: *requestURL}})
 				ctx.EXPECT().SetPipelineError(mock.MatchedBy(func(redirErr *heimdall.RedirectError) bool {
 					t.Helper()
 
@@ -399,40 +308,40 @@ if: type(Error) == authentication_error
 					return true
 				}))
 			},
-			assert: func(t *testing.T, wasResponsible bool, err error) {
+			assert: func(t *testing.T, err error) {
 				t.Helper()
 
 				require.NoError(t, err)
-				assert.True(t, wasResponsible)
 			},
 		},
 	} {
-		t.Run("case="+tc.uc, func(t *testing.T) {
+		t.Run(uc, func(t *testing.T) {
 			// GIVEN
 			conf, err := testsupport.DecodeTestConfig(tc.config)
 			require.NoError(t, err)
 
-			mctx := mocks.NewContextMock(t)
-			mctx.EXPECT().AppContext().Return(context.Background())
+			mctx := mocks.NewRequestContextMock(t)
+			mctx.EXPECT().Context().Return(t.Context())
 
 			tc.configureContext(t, mctx)
 
-			errorHandler, err := newRedirectErrorHandler("foo", conf)
+			validator, err := validation.NewValidator(
+				validation.WithTagValidator(config.EnforcementSettings{}),
+			)
 			require.NoError(t, err)
 
-			var (
-				isResponsible bool
-				execErr       error
-			)
+			appCtx := app.NewContextMock(t)
+			appCtx.EXPECT().Validator().Maybe().Return(validator)
+			appCtx.EXPECT().Logger().Return(log.Logger)
+
+			errorHandler, err := newRedirectErrorHandler(appCtx, "foo", conf)
+			require.NoError(t, err)
 
 			// WHEN
-			isResponsible = errorHandler.CanExecute(mctx, tc.error)
-			if isResponsible {
-				execErr = errorHandler.Execute(mctx, tc.error)
-			}
+			execErr := errorHandler.Execute(mctx, tc.error)
 
 			// THEN
-			tc.assert(t, isResponsible, execErr)
+			tc.assert(t, execErr)
 		})
 	}
 }

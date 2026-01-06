@@ -26,8 +26,6 @@ import (
 	"github.com/dadrus/heimdall/internal/heimdall"
 )
 
-//go:generate mockery --name ErrorHandler --structname ErrorHandlerMock
-
 type ErrorHandler interface {
 	HandleError(rw http.ResponseWriter, req *http.Request, err error)
 }
@@ -58,8 +56,6 @@ func (h *errorHandler) HandleError(rw http.ResponseWriter, req *http.Request, er
 		h.onCommunicationError(rw, req, err)
 	case errors.Is(err, heimdall.ErrArgument):
 		h.onPreconditionError(rw, req, err)
-	case errors.Is(err, heimdall.ErrMethodNotAllowed):
-		h.onBadMethodError(rw, req, err)
 	case errors.Is(err, heimdall.ErrNoRuleFound):
 		h.onNoRuleError(rw, req, err)
 	case errors.Is(err, &heimdall.RedirectError{}):

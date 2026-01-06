@@ -18,40 +18,44 @@ package config
 
 import (
 	"net/url"
-
-	"github.com/goccy/go-json"
 )
 
 type Backend struct {
-	Host        string       `json:"host"    yaml:"host"`
-	URLRewriter *URLRewriter `json:"rewrite" yaml:"rewrite"`
+	Host              string       `json:"host"                yaml:"host"             validate:"required"` //nolint:tagalign,lll
+	ForwardHostHeader *bool        `json:"forward_host_header" yaml:"forward_host_header"`
+	URLRewriter       *URLRewriter `json:"rewrite"             yaml:"rewrite"          validate:"omitnil"` //nolint:tagalign,lll
 }
 
-func (f *Backend) CreateURL(value *url.URL) *url.URL {
+func (b *Backend) CreateURL(value *url.URL) *url.URL {
 	upstreamURL := &url.URL{
 		Scheme:   value.Scheme,
-		Host:     f.Host,
+		Host:     b.Host,
 		Path:     value.Path,
 		RawPath:  value.RawPath,
 		RawQuery: value.RawQuery,
 	}
 
-	if f.URLRewriter != nil {
-		f.URLRewriter.Rewrite(upstreamURL)
+	if b.URLRewriter != nil {
+		b.URLRewriter.Rewrite(upstreamURL)
 	}
 
 	return upstreamURL
 }
 
-func (f *Backend) DeepCopyInto(out *Backend) {
-	if f == nil {
-		return
+func (b *Backend) DeepCopyInto(out *Backend) {
+	*out = *b
+
+	if b.ForwardHostHeader != nil {
+		in, out := &b.ForwardHostHeader, &out.ForwardHostHeader
+		*out = new(bool)
+		**out = **in
 	}
 
-	jsonStr, _ := json.Marshal(f)
+	if b.URLRewriter != nil {
+		b.URLRewriter.DeepCopyInto(out.URLRewriter)
+	}
+}
 
-	// we cannot do anything with an error here as
-	// the interface implemented here doesn't support
-	// error responses
-	json.Unmarshal(jsonStr, out) //nolint:errcheck
+func (b *Backend) IsInsecure() bool {
+	return b != nil && b.URLRewriter != nil && b.URLRewriter.Scheme == "http"
 }

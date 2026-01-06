@@ -20,94 +20,66 @@ import (
 	"os"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/dadrus/heimdall/internal/heimdall"
 )
 
-func TestValidateNotExistingConfigFile(t *testing.T) {
+func TestValidateEmptyConfig(t *testing.T) {
 	t.Parallel()
 
-	err := ValidateConfig("foo.bar")
+	tmpFile, err := os.CreateTemp(t.TempDir(), "test-config-")
+	require.NoError(t, err)
+
+	err = ValidateConfigSchema(tmpFile)
 
 	require.Error(t, err)
 	require.ErrorIs(t, err, heimdall.ErrConfiguration)
-	assert.Contains(t, err.Error(), "read config file")
+	require.ErrorContains(t, err, "EOF")
 }
 
-func TestValidateNotReadableConfigFile(t *testing.T) {
+func TestValidateConfigWithInvalidYAMLContent(t *testing.T) {
 	t.Parallel()
 
-	tmpFile, err := os.CreateTemp("", "test-config-")
+	tmpFile, err := os.CreateTemp(t.TempDir(), "test-config-")
 	require.NoError(t, err)
-
-	require.NoError(t, tmpFile.Chmod(0o200))
-
-	defer os.Remove(tmpFile.Name())
-
-	err = ValidateConfig(tmpFile.Name())
-
-	require.Error(t, err)
-	require.ErrorIs(t, err, heimdall.ErrConfiguration)
-	assert.Contains(t, err.Error(), "read config file")
-}
-
-func TestValidateEmptyConfigFile(t *testing.T) {
-	t.Parallel()
-
-	tmpFile, err := os.CreateTemp("", "test-config-")
-	require.NoError(t, err)
-
-	defer os.Remove(tmpFile.Name())
-
-	err = ValidateConfig(tmpFile.Name())
-
-	require.Error(t, err)
-	require.ErrorIs(t, err, heimdall.ErrConfiguration)
-	assert.Contains(t, err.Error(), "empty")
-}
-
-func TestValidateConfigFileWithInvalidYAMLContent(t *testing.T) {
-	t.Parallel()
-
-	tmpFile, err := os.CreateTemp("", "test-config-")
-	require.NoError(t, err)
-
-	defer os.Remove(tmpFile.Name())
 
 	_, err = tmpFile.WriteString(`foobar`)
 	require.NoError(t, err)
 
-	err = ValidateConfig(tmpFile.Name())
+	err = ValidateConfigSchema(tmpFile)
 
 	require.Error(t, err)
 	require.ErrorIs(t, err, heimdall.ErrConfiguration)
-	assert.Contains(t, err.Error(), "parse config")
+	require.ErrorContains(t, err, "parse config")
 }
 
-func TestValidateConfigFileWithValidYAMLContentButFailingSchemaValidation(t *testing.T) {
+func TestValidateConfigWithValidYAMLContentButFailingSchemaValidation(t *testing.T) {
 	t.Parallel()
 
-	tmpFile, err := os.CreateTemp("", "test-config-")
+	tmpFile, err := os.CreateTemp(t.TempDir(), "test-config-")
 	require.NoError(t, err)
-
-	defer os.Remove(tmpFile.Name())
 
 	_, err = tmpFile.WriteString(`foo: bar`)
 	require.NoError(t, err)
 
-	err = ValidateConfig(tmpFile.Name())
+	_, err = tmpFile.Seek(0, 0)
+	require.NoError(t, err)
+
+	err = ValidateConfigSchema(tmpFile)
 
 	require.Error(t, err)
 	require.ErrorIs(t, err, heimdall.ErrConfiguration)
-	assert.Contains(t, err.Error(), "validate")
+	require.ErrorContains(t, err, "'foo' not allowed")
 }
 
 func TestValidateValidConfigFile(t *testing.T) {
 	t.Parallel()
 
-	err := ValidateConfig("./test_data/test_config.yaml")
+	file, err := os.Open("./test_data/test_config.yaml")
+	require.NoError(t, err)
+
+	err = ValidateConfigSchema(file)
 
 	require.NoError(t, err)
 }

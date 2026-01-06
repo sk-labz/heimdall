@@ -93,27 +93,23 @@ func TestNewListener(t *testing.T) {
 	_, err = pemFile.Write(pemBytes)
 	require.NoError(t, err)
 
-	for _, tc := range []struct {
-		uc          string
-		network     string
-		serviceConf config.ServiceConfig
+	for uc, tc := range map[string]struct {
+		serviceConf config.ServeConfig
 		assert      func(t *testing.T, err error, ln net.Listener, port string)
 	}{
-		{
-			uc:          "creation fails",
-			network:     "foo",
-			serviceConf: config.ServiceConfig{},
+		"creation fails": {
+			serviceConf: config.ServeConfig{
+				Host: ".....",
+			},
 			assert: func(t *testing.T, err error, _ net.Listener, _ string) {
 				t.Helper()
 
 				require.Error(t, err)
-				assert.Contains(t, err.Error(), "foo")
+				require.ErrorContains(t, err, "no such host")
 			},
 		},
-		{
-			uc:          "without TLS",
-			network:     "tcp",
-			serviceConf: config.ServiceConfig{Host: "127.0.0.1"},
+		"without TLS": {
+			serviceConf: config.ServeConfig{Host: "127.0.0.1"},
 			assert: func(t *testing.T, err error, ln net.Listener, port string) {
 				t.Helper()
 
@@ -124,10 +120,8 @@ func TestNewListener(t *testing.T) {
 				assert.Equal(t, "127.0.0.1:"+port, ln.Addr().String())
 			},
 		},
-		{
-			uc:      "fails due to not existent key store for TLS usage",
-			network: "tcp",
-			serviceConf: config.ServiceConfig{
+		"fails due to not existent key store for TLS usage": {
+			serviceConf: config.ServeConfig{
 				TLS: &config.TLS{KeyStore: config.KeyStore{Path: "/no/such/file"}},
 			},
 			assert: func(t *testing.T, err error, _ net.Listener, _ string) {
@@ -135,25 +129,21 @@ func TestNewListener(t *testing.T) {
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrInternal)
-				assert.Contains(t, err.Error(), "failed loading")
+				require.ErrorContains(t, err, "failed loading")
 			},
 		},
-		{
-			uc:          "fails due to not specified key store",
-			network:     "tcp",
-			serviceConf: config.ServiceConfig{TLS: &config.TLS{}},
+		"fails due to not specified key store": {
+			serviceConf: config.ServeConfig{TLS: &config.TLS{}},
 			assert: func(t *testing.T, err error, _ net.Listener, _ string) {
 				t.Helper()
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrConfiguration)
-				assert.Contains(t, err.Error(), "no path to tls key store")
+				require.ErrorContains(t, err, "no path to tls key store")
 			},
 		},
-		{
-			uc:      "successful with specified key id",
-			network: "tcp",
-			serviceConf: config.ServiceConfig{
+		"successful with specified key id": {
+			serviceConf: config.ServeConfig{
 				TLS: &config.TLS{
 					KeyStore:   config.KeyStore{Path: pemFile.Name()},
 					KeyID:      "key1",
@@ -170,7 +160,7 @@ func TestNewListener(t *testing.T) {
 			},
 		},
 	} {
-		t.Run(tc.uc, func(t *testing.T) {
+		t.Run(uc, func(t *testing.T) {
 			// GIVEN
 			port, err := freePort()
 			require.NoError(t, err)
@@ -178,7 +168,7 @@ func TestNewListener(t *testing.T) {
 			tc.serviceConf.Port = port
 
 			// WHEN
-			ln, err := New(tc.network, tc.serviceConf.Address(), tc.serviceConf.TLS, nil)
+			ln, err := New(t.Context(), "test", tc.serviceConf.Address(), tc.serviceConf.TLS, nil, nil)
 
 			// THEN
 			defer func() {

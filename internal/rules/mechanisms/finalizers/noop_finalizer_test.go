@@ -17,12 +17,14 @@
 package finalizers
 
 import (
-	"context"
 	"testing"
 
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/dadrus/heimdall/internal/app"
+	"github.com/dadrus/heimdall/internal/heimdall"
 	"github.com/dadrus/heimdall/internal/heimdall/mocks"
 )
 
@@ -30,10 +32,13 @@ func TestNoopFinalizerExecution(t *testing.T) {
 	t.Parallel()
 
 	// GIVEN
-	ctx := mocks.NewContextMock(t)
-	ctx.EXPECT().AppContext().Return(context.Background())
+	appCtx := app.NewContextMock(t)
+	appCtx.EXPECT().Logger().Return(log.Logger)
 
-	finalizer := newNoopFinalizer("foo")
+	ctx := mocks.NewRequestContextMock(t)
+	ctx.EXPECT().Context().Return(t.Context())
+
+	finalizer := newNoopFinalizer(appCtx, "foo")
 
 	// WHEN
 	err := finalizer.Execute(ctx, nil)
@@ -47,17 +52,60 @@ func TestNoopFinalizerExecution(t *testing.T) {
 func TestCreateNoopFinalizerFromPrototype(t *testing.T) {
 	t.Parallel()
 
-	// GIVEN
-	prototype := newNoopFinalizer("baz")
+	for uc, tc := range map[string]struct {
+		stepID  string
+		newConf map[string]any
+		assert  func(t *testing.T, err error, prototype *noopFinalizer, configured *noopFinalizer)
+	}{
+		"no new config and no step ID": {
+			assert: func(t *testing.T, err error, prototype *noopFinalizer, configured *noopFinalizer) {
+				t.Helper()
 
-	// WHEN
-	fin1, err1 := prototype.WithConfig(nil)
-	fin2, err2 := prototype.WithConfig(map[string]any{"foo": "bar"})
+				require.NoError(t, err)
 
-	// THEN
-	require.NoError(t, err1)
-	assert.Equal(t, prototype, fin1)
+				assert.Equal(t, prototype, configured)
+			},
+		},
+		"no new config but with step ID": {
+			stepID: "foo",
+			assert: func(t *testing.T, err error, prototype *noopFinalizer, configured *noopFinalizer) {
+				t.Helper()
 
-	require.NoError(t, err2)
-	assert.Equal(t, prototype, fin2)
+				require.NoError(t, err)
+
+				assert.NotEqual(t, configured, prototype)
+				assert.Equal(t, prototype.Name(), configured.Name())
+				assert.Equal(t, "foo", configured.ID())
+			},
+		},
+		"with new config": {
+			newConf: map[string]any{"foo": "bar"},
+			assert: func(t *testing.T, err error, _ *noopFinalizer, _ *noopFinalizer) {
+				t.Helper()
+
+				require.Error(t, err)
+				require.ErrorIs(t, err, heimdall.ErrConfiguration)
+				require.ErrorContains(t, err, "cannot be reconfigured")
+			},
+		},
+	} {
+		t.Run(uc, func(t *testing.T) {
+			// GIVEN
+			appCtx := app.NewContextMock(t)
+			appCtx.EXPECT().Logger().Return(log.Logger)
+
+			prototype := newNoopFinalizer(appCtx, uc)
+
+			// WHEN
+			conf, err := prototype.WithConfig(tc.stepID, tc.newConf)
+			authz, ok := conf.(*noopFinalizer)
+
+			// THEN
+			if err == nil {
+				require.True(t, ok)
+			}
+
+			tc.assert(t, err, prototype, authz)
+		})
+	}
 }

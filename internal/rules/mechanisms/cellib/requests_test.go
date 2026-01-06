@@ -38,8 +38,8 @@ func TestRequests(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	rawURI := "http://localhost/foo/bar?foo=bar&foo=baz&bar=foo"
-	uri, err := url.Parse("http://localhost/foo/bar?foo=bar&foo=baz&bar=foo")
+	rawURI := "http://localhost:8080/foo/bar?foo=bar&foo=baz&bar=foo"
+	uri, err := url.Parse(rawURI)
 	require.NoError(t, err)
 
 	reqf := mocks.NewRequestFunctionsMock(t)
@@ -50,27 +50,33 @@ func TestRequests(t *testing.T) {
 	reqf.EXPECT().Body().Return(map[string]any{"foo": []any{"bar"}})
 
 	req := &heimdall.Request{
-		RequestFunctions:  reqf,
-		Method:            http.MethodHead,
-		URL:               uri,
+		RequestFunctions: reqf,
+		Method:           http.MethodHead,
+		URL: &heimdall.URL{
+			URL:      *uri,
+			Captures: map[string]string{"foo": "bar"},
+		},
 		ClientIPAddresses: []string{"127.0.0.1"},
 	}
 
-	for _, tc := range []struct {
-		expr string
-	}{
-		{expr: `Request.Method == "HEAD"`},
-		{expr: `Request.URL.String() == "` + rawURI + `"`},
-		{expr: `Request.Cookie("foo") == "bar"`},
-		{expr: `Request.Header("bar") == "baz"`},
-		{expr: `Request.Header("zab").contains("bar")`},
-		{expr: `Request.Header("accept").matches("(text/html|application/xml)")`},
-		{expr: `["text/html", "application/xml", "application/json"].exists(v, Request.Header("accept").contains(v))`},
-		{expr: `Request.ClientIPAddresses in networks("127.0.0.0/24")`},
-		{expr: `Request.Body().foo[0] == "bar"`},
+	for _, tc := range []string{
+		`Request.Method == "HEAD"`,
+		`Request.URL.String() == "` + rawURI + `"`,
+		`Request.URL.Captures.foo == "bar"`,
+		`Request.URL.Query().bar == ["foo"]`,
+		`Request.URL.Host == "localhost:8080"`,
+		`Request.URL.Hostname() == "localhost"`,
+		`Request.URL.Port() == "8080"`,
+		`Request.Cookie("foo") == "bar"`,
+		`Request.Header("bar") == "baz"`,
+		`Request.Header("zab").contains("bar")`,
+		`Request.Header("accept").matches("(text/html|application/xml)")`,
+		`["text/html", "application/xml", "application/json"].exists(v, Request.Header("accept").contains(v))`,
+		`Request.ClientIPAddresses in networks("127.0.0.0/24")`,
+		`Request.Body().foo[0] == "bar"`,
 	} {
-		t.Run(tc.expr, func(t *testing.T) {
-			ast, iss := env.Compile(tc.expr)
+		t.Run(tc, func(t *testing.T) {
+			ast, iss := env.Compile(tc)
 			if iss != nil {
 				require.NoError(t, iss.Err())
 			}

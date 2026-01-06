@@ -21,11 +21,9 @@ import (
 	"github.com/dadrus/heimdall/internal/rules/mechanisms/subject"
 )
 
-//go:generate mockery --name Authenticator --structname AuthenticatorMock
-
 type Authenticator interface {
 	ID() string
-	Execute(ctx heimdall.Context) (*subject.Subject, error)
-	WithConfig(config map[string]any) (Authenticator, error)
-	IsFallbackOnErrorAllowed() bool
+	Execute(ctx heimdall.RequestContext) (*subject.Subject, error)
+	WithConfig(stepID string, config map[string]any) (Authenticator, error)
+	IsInsecure() bool
 }

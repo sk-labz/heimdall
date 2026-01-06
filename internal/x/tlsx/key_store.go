@@ -18,6 +18,7 @@ package tlsx
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"sync"
 
 	"github.com/rs/zerolog"
@@ -26,8 +27,6 @@ import (
 	"github.com/dadrus/heimdall/internal/keystore"
 	"github.com/dadrus/heimdall/internal/x/errorchain"
 )
-
-//go:generate mockery --name compatibilityChecker --structname compatibilityCheckerMock --inpackage --testonly
 
 type compatibilityChecker interface {
 	SupportsCertificate(c *tls.Certificate) error
@@ -38,8 +37,9 @@ type keyStore struct {
 	password string
 	keyID    string
 
-	tlsCert *tls.Certificate
-	mut     sync.Mutex
+	tlsCert   *tls.Certificate
+	certChain []*x509.Certificate
+	mut       sync.RWMutex
 }
 
 func newTLSKeyStore(path, keyID, password string) (*keyStore, error) {
@@ -54,6 +54,19 @@ func newTLSKeyStore(path, keyID, password string) (*keyStore, error) {
 	}
 
 	return ks, nil
+}
+
+func (cr *keyStore) OnChanged(log zerolog.Logger) {
+	err := cr.load()
+	if err != nil {
+		log.Warn().Err(err).
+			Str("_file", cr.path).
+			Msg("TLS key store reload failed")
+	} else {
+		log.Info().
+			Str("_file", cr.path).
+			Msg("TLS key store reloaded")
+	}
 }
 
 func (cr *keyStore) load() error {
@@ -88,34 +101,29 @@ func (cr *keyStore) load() error {
 
 	cr.mut.Lock()
 	cr.tlsCert = &cert
+	cr.certChain = entry.CertChain
 	cr.mut.Unlock()
 
 	return nil
 }
 
+func (cr *keyStore) activeCertificateChain() []*x509.Certificate {
+	cr.mut.RLock()
+	defer cr.mut.RUnlock()
+
+	return cr.certChain
+}
+
 func (cr *keyStore) certificate(cc compatibilityChecker) (*tls.Certificate, error) {
 	var cert *tls.Certificate
 
-	cr.mut.Lock()
+	cr.mut.RLock()
 	cert = cr.tlsCert
-	cr.mut.Unlock()
+	cr.mut.RUnlock()
 
 	if err := cc.SupportsCertificate(cert); err != nil {
 		return nil, err
 	}
 
 	return cert, nil
-}
-
-func (cr *keyStore) OnChanged(log zerolog.Logger) {
-	err := cr.load()
-	if err != nil {
-		log.Warn().Err(err).
-			Str("_file", cr.path).
-			Msg("TLS key store reload failed")
-	} else {
-		log.Info().
-			Str("_file", cr.path).
-			Msg("TLS key store reloaded")
-	}
 }

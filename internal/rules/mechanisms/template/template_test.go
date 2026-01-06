@@ -38,11 +38,13 @@ func TestTemplateRender(t *testing.T) {
 	reqf.EXPECT().Header("X-My-Header").Return("my-value")
 	reqf.EXPECT().Cookie("session_cookie").Return("session-value")
 
-	ctx := mocks.NewContextMock(t)
+	ctx := mocks.NewRequestContextMock(t)
 	ctx.EXPECT().Request().Return(&heimdall.Request{
-		RequestFunctions:  reqf,
-		Method:            http.MethodPatch,
-		URL:               &url.URL{Scheme: "http", Host: "foobar.baz", Path: "zab", RawQuery: "my_query_param=query_value"},
+		RequestFunctions: reqf,
+		Method:           http.MethodPatch,
+		URL: &heimdall.URL{
+			URL: url.URL{Scheme: "http", Host: "foobar.baz", Path: "zab", RawQuery: "my_query_param=query_value"},
+		},
 		ClientIPAddresses: []string{"192.168.1.1"},
 	})
 
@@ -127,7 +129,7 @@ func TestAtIndex(t *testing.T) {
 
 			if len(tc.err) != 0 {
 				require.Error(t, err)
-				assert.Contains(t, err.Error(), tc.err)
+				require.ErrorContains(t, err, tc.err)
 			} else {
 				require.Equal(t, tc.res, res)
 			}

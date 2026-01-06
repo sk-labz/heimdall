@@ -21,11 +21,9 @@ import (
 	"github.com/dadrus/heimdall/internal/rules/mechanisms/subject"
 )
 
-//go:generate mockery --name Contextualizer --structname ContextualizerMock
-
 type Contextualizer interface {
 	ID() string
-	Execute(ctx heimdall.Context, sub *subject.Subject) error
-	WithConfig(config map[string]any) (Contextualizer, error)
+	Execute(ctx heimdall.RequestContext, sub *subject.Subject) error
+	WithConfig(stepID string, config map[string]any) (Contextualizer, error)
 	ContinueOnError() bool
 }

@@ -21,8 +21,7 @@ import (
 	"github.com/dadrus/heimdall/internal/rules/mechanisms/subject"
 )
 
-//go:generate mockery --name executionCondition --structname ExecutionConditionMock
-
 type executionCondition interface {
-	CanExecute(ctx heimdall.Context, sub *subject.Subject) (bool, error)
+	CanExecuteOnSubject(ctx heimdall.RequestContext, sub *subject.Subject) (bool, error)
+	CanExecuteOnError(ctx heimdall.RequestContext, err error) (bool, error)
 }

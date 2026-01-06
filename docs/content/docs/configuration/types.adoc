@@ -341,6 +341,45 @@ config:
 ----
 ====
 
+=== HTTP Message Signatures
+
+This strategy implements HTTP message signatures according to https://datatracker.ietf.org/doc/html/rfc9421[RFC 9421] to sign outbound requests.
+
+`type` must be set to `http_message_signatures`. `config` supports the following properties:
+
+* *`ttl`*: _link:{{< relref "#_duration" >}}[Duration]_ (optional)
++
+The TTL of the resulting signature. Defaults to 1m. Responsible for setting `created` and `expires` parameters in the resulting signature.
+
+* *`label`*: _string_ (optional)
++
+The label to use. Defaults to `sig`.
+
+* *`components`*: _string array_ (mandatory)
++
+The components to be covered by the signature. While the RFC allows for signatures that do not cover any components, this is considered a security risk. When using the `"content-digest"` component, Heimdall will compute hash values of the request body using `sha-256` and `sha-512` algorithms. It will then add a `Content-Digest` header with these hash values to the request, and this header will be included in the signature calculation.
+
+* *`signer`*: _link:{{< relref "/docs/configuration/types.adoc#_signer" >}}[Signer]_ (mandatory)
++
+The configuration of the key material used for signature creation purposes, as well as the name used for the `tag` parameter in the resulting signature.
+
+.Strategy configuration
+====
+
+[source, yaml]
+----
+type: http_message_signatures
+config:
+  ttl: 2m
+  label: foo
+  components: ["@method", "content-digest", "@authority", "x-my-fancy-header"]
+  signer:
+    name: bar
+    key-store:
+      path: /path/to/key.pem
+----
+====
+
 === OAuth2 Client Credentials Grant Flow Strategy
 
 This strategy implements the https://datatracker.ietf.org/doc/html/rfc6749#section-4.4[OAuth2 Client Credentials Grant Flow] to obtain an access token expected by the endpoint. Heimdall caches the received access token.
@@ -351,6 +390,8 @@ This strategy implements the https://datatracker.ietf.org/doc/html/rfc6749#secti
 * *`token_url`*: _string_ (mandatory)
 +
 The token endpoint of the authorization server.
++
+NOTE: Usage of TLS is enforced as long as heimdall is not started with `--insecure-skip-egress-tls-enforcement` flag, which allows insecure communication to any of the configured services.
 
 * *`client_id`*: _string_ (mandatory)
 +
@@ -376,7 +417,7 @@ The scopes required for the access token.
 
 * *`cache_ttl`*: _link:{{< relref "#_duration" >}}[Duration]_ (optional)
 +
-How long to cache the token received from the token endpoint. Defaults to the token expiration information from the token endpoint (the value of the `expires_in` field) if present. If the token expiration inforation is not present and `cache_ttl` is not configured, the received token is not cached. If the token expiration information is present in the response and `cache_ttl` is configured the shorter value is taken. If caching is enabled, the token is cached until 5 seconds before its expiration. To disable caching, set it to `0s`. The cache key calculation is based on the values of `token_url`, `client_id`, `client_secret` and the `scopes` properties.
+How long to cache the token received from the token endpoint. Defaults to the token expiration information from the token endpoint (the value of the `expires_in` field) if present. If the token expiration information is not present and `cache_ttl` is not configured, the received token is not cached. If the token expiration information is present in the response and `cache_ttl` is configured the shorter value is taken. If caching is enabled, the token is cached until 5 seconds before its expiration. To disable caching, set it to `0s`. The cache key calculation is based on the values of `token_url`, `client_id`, `client_secret` and the `scopes` properties.
 
 * *`header`*: _object_ (optional, overridable)
 +
@@ -450,6 +491,8 @@ So with `10B` you can define the byte size of 10 bytes and with `2MB` you can sa
 
 == CORS
 
+NOTE: This functionality is only supported if heimdall is operated in proxy mode. In decision operation mode, this configuration is ignored.
+
 https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS[CORS] (Cross-Origin Resource Sharing) headers can be added and configured by making use of this type. This functionality allows for advanced security features to quickly be set. If CORS headers are set, then heimdall does not pass preflight requests to its decision pipeline, instead the response will be generated and sent back to the client directly. Following properties are supported:
 
 * *`allowed_origins`*: _string array_ (optional)
@@ -498,15 +541,19 @@ So with `10s` you can define the duration of 10 seconds and with `2h` you can sa
 
 == Endpoint
 
-The Endpoint type defines properties required for the communication with an endpoint.
+The `Endpoint` type defines the properties required for communication with an endpoint.
 
-If only the URL is required to be set, you can specify it by using just a string. If more than the URL is required to be specified, following properties are available:
+If only the URL needs to be set, you can specify it as a string. If additional properties are required, the following options are available:
 
 * *`url`* _string_ (mandatory)
 +
-The actual url of the endpoint. Depending on the mechanism, a URL can be templated
+The URL of the endpoint. Depending on the mechanism, the URL can be templated.
 +
-NOTE: If templating is used, user info, scheme and host parts of the URL cannot be templated. Attempts to do so will result in runtime errors.
+[NOTE]
+====
+* If templating is used, the user info, scheme, and host parts of the URL cannot be templated. Attempts to do so will result in runtime errors.
+* TLS is enforced unless heimdall is started with the `--insecure-skip-egress-tls-enforcement` flag, which allows insecure communication with any configured service.
+====
 
 * *`method`* _string_ (optional)
 +
@@ -526,23 +573,15 @@ HTTP headers to be sent to the endpoint.
 +
 CAUTION: These headers are not analyzed by heimdall and are just forwarded to the endpoint. E.g. if you configure the `Content-Encoding` to something like `gzip`, the service behind the used endpoint might fail to answer, as it would expect the body to be compressed.
 
-* *`http_cache`* _object_ (optional)
+* *`http_cache`* _link:{{< relref "#_http_cache" >}}[HTTP Cache]_ (optional)
 +
-Controls whether HTTP caching according to https://www.rfc-editor.org/rfc/rfc7234[RFC 7234] should be used. To support this, that object defines the following properties:
-
-** *`enabled`* _boolean_ (optional)
-+
-Defaults to `false` if not otherwise stated in the description of the configuration type, making use of the `endpoint` property. If set to `true` heimdall will strictly follow the requirements from RFC 7234 and cache the responses if possible and reuse these if still valid.
-
-** *`cache_ttl`* _link:{{< relref "#_duration" >}}[Duration]_ (optional)
-+
-Specifies how long heimdall should cache the response if the endpoint referenced by the URL does not provide any explicit expiration time (no heuristic freshness lifetime is calculated). Without configuring this property, heimdall treats such responses as not cacheable. Defaults to `0s` if not otherwise stated in the description of the configuration type making use of the `endpoint` property.
+Controls whether HTTP caching according to https://www.rfc-editor.org/rfc/rfc7234[RFC 7234] should be used.
 
 .Endpoint configuration as string
 ====
 [source, text]
 ----
-http://foo.bar
+https://foo.bar
 ----
 ====
 
@@ -551,7 +590,7 @@ http://foo.bar
 
 [source, yaml]
 ----
-url: http://foo.bar
+url: https://foo.bar
 method: GET
 retry:
   give_up_after: 5s
@@ -565,7 +604,8 @@ auth:
 headers:
   X-My-First-Header: foobar
   X-My-Second-Header: barfoo
-enable_http_cache: true
+http_cache:
+  enabled: true
 ----
 
 ====
@@ -581,9 +621,20 @@ Following types are available:
 * `authorization_error` (*) - used if an authorizer failed to authorize the subject. E.g. an authorizer is configured to use an expression on the given subject and request context, but that expression returned with an error. Error of this type results by default in `403 Forbidden` response if the default error handler was used to handle such error.
 * `communication_error` (*) - this error is used to signal a communication error while communicating to a remote system during the execution of the pipeline of the matched rule. Timeouts of DNSs errors result in such an error. Error of this type results by default in `502 Bad Gateway` HTTP code if handled by the default error handler.
 * `internal_error` - used if heimdall run into an internal error condition while processing the request. E.g. something went wrong while unmarshalling a JSON object, or if there was a configuration error, which couldn't be raised while loading a rule, etc. Results by default in `500 Internal Server Error` response to the caller.
-* `method_error` - this error is used to signal that a matched rule does not allow usage of the HTTP method used to submit the request. Error of this type results by default in `405 Method Not Allowed` HTTP code.
 * `no_rule_error` - this error is used to signal, there is no matching rule to handle the given request. Error of this type results by default in `404 Not Found` HTTP code.
 * `precondition_error` (*) - used if the request does not contain required/expected data. E.g. if an authenticator could not find a cookie configured. Error of this type results by default in `400 Bad Request` HTTP code if handled by the default error handler.
+
+== HTTP Cache
+
+Controls whether HTTP caching according to https://www.rfc-editor.org/rfc/rfc7234[RFC 7234] should be used. Following properties are defined:
+
+* *`enabled`* _boolean_ (optional)
++
+Defaults to `false` if not otherwise stated in the description of the configuration type, making use of the HTTP Cache settings. When set to `true`, heimdall will strictly comply with the HTTP caching rules defined in RFC 7234, caching responses only when allowed and reusing them only if they remain valid per the standard.
+
+* *`cache_ttl`* _link:{{< relref "#_duration" >}}[Duration]_ (optional)
++
+Specifies how long heimdall should cache the response if it does not contain any explicit expiration time (no heuristic freshness lifetime is calculated). If this property is not set, heimdall considers such responses uncacheable. Unless specified otherwise in the configuration type description utilizing the HTTP Cache settings, the default value is `0s`.
 
 == Key Store
 
@@ -771,42 +822,6 @@ This matcher enables matching scopes using wildcards. It goes beyond the link:{{
 
 This matcher can only be used by explicitly setting the `matching_strategy` to `wildcard` and defining the required patterns in the `values` property.
 
-== Subject
-
-This configuration type enables extraction of subject information from responses received by Heimdall from authentication services. Following properties are available.
-
-* *`id`*: _string_ (mandatory)
-+
-A https://github.com/tidwall/gjson/blob/master/SYNTAX.md[GJSON Path] pointing to the id of the subject in the JSON object.
-
-* *`attributes`*: _string_ (optional)
-+
-A https://github.com/tidwall/gjson/blob/master/SYNTAX.md[GJSON Path] pointing to the attributes of the subject in the JSON object. Defaults to `@this`.
-
-.Extracting subject id from an https://tools.ietf.org/html/rfc7662[OAuth2 Introspection] endpoint response.
-====
-
-This example shows how to extract the subject id from an https://tools.ietf.org/html/rfc7662[OAuth2 Introspection] endpoint response and set the subject attributes to the entire response
-
-[source, yaml]
-----
-id: sub
-attributes: @this
-----
-
-Setting `attributes` was actually not required, as `@this` would be set by default anyway.
-====
-
-.Extracting subject id from an https://www.ory.sh/docs/kratos/[Ory Kratos] "whoami" endpoint response
-====
-
-This example shows how to extract the subject id from an https://www.ory.sh/docs/kratos/[Ory Kratos] "whoami" endpoint response and set the subject attributes to the entire response. `attributes` is not configured, so default is used.
-
-[source, yaml]
-----
-id: identity.id
-----
-====
 
 == Session Lifespan
 This configuration type enables the configuration of session lifespans, used for session validation for those authenticators, which act on non-standard protocols. Following properties are available.
@@ -902,6 +917,114 @@ validity_leeway: 10s
 As you see, there is no need to define the time format as the times values appearing in the responses from an introspection endpoint are Unix Epoch time stamps.
 
 ====
+
+== Signer
+
+When heimdall is used to issue signed objects, like JWTs, to enable upstream services to rely on authentic information, it acts as an issuer of such objects and requires corresponding configuration.
+
+Following properties are supported:
+
+* *`name`*: _string_ (optional)
++
+The name used to specify the issuer. E.g. if a JWT is generated, this value is used to set the `iss` claim. If not set, the value `heimdall` is used.
+
+* *`key_store`*: _link:{{< relref "/docs/configuration/types.adoc#_key_store" >}}[Key Store]_ (mandatory)
++
+The key store containing the cryptographic material. At least one private key must be present.
+
+* *`key_id`*: _string_ (optional)
++
+If the `key_store` contains multiple keys, this property can be used to specify the key to use (see also link:{{< relref "/docs/configuration/types.adoc#_key_id_lookup" >}}[Key-Id Lookup]). If not specified, the first key is used. If specified, but there is no key for the given key id present, an error is raised and heimdall will refuse to start.
+
+.Possible configuration
+====
+Imagine you have a PEM file located in `/opt/heimdall/keystore.pem` with the following contents:
+
+[source, txt]
+----
+-----BEGIN EC PRIVATE KEY-----
+X-Key-ID: foo
+
+MIGkAgEBBDBRLr783dIM5NHJnDDMRVBiFSF56xqHle5lZk1ZCyyow9wKZGuF4EWK
+jRBISBkE3NSgBwYFK4EEACKhZANiAAQ+oGUOJpVjntIWuanYxpXe6oN5tKhzLhBX
+GP1SOXiLhnPNnN2uZu9KwOoBzoZhr/Fxw+sziXmzHJwjluz78VOlFKyopxTfmxRZ
+0qq3f/KHWdDtVvmTfT0O/ux9mg6mCJw=
+-----END EC PRIVATE KEY-----
+-----BEGIN CERTIFICATE-----
+MIIByjCCAVGgAwIBAgIBATAKBggqhkjOPQQDAzAuMQswCQYDVQQGEwJFVTENMAsG
+A1UEChMEVGVzdDEQMA4GA1UEAxMHVGVzdCBDQTAeFw0yMjA4MTUwOTE3MTFaFw0y
+MjA4MTUxMDE3MTFaMDAxCzAJBgNVBAYTAkVVMQ0wCwYDVQQKEwRUZXN0MRIwEAYD
+VQQDEwlUZXN0IEVFIDEwdjAQBgcqhkjOPQIBBgUrgQQAIgNiAAQ+oGUOJpVjntIW
+uanYxpXe6oN5tKhzLhBXGP1SOXiLhnPNnN2uZu9KwOoBzoZhr/Fxw+sziXmzHJwj
+luz78VOlFKyopxTfmxRZ0qq3f/KHWdDtVvmTfT0O/ux9mg6mCJyjQTA/MA4GA1Ud
+DwEB/wQEAwIHgDAMBgNVHQ4EBQQDYmFyMB8GA1UdIwQYMBaAFLO77bgPgZMKz11D
+BVDUXvtNGeBnMAoGCCqGSM49BAMDA2cAMGQCMFRlx9Bq0MuSh5pDhDTqRq/MnxxD
+W7qZg15AXoNnLrR60vV9gHjzkp1UkcU9viRIuAIwU0BjwDncp9z1seqKh+/eJV3f
+xstQe2rzUEptWLIiPFoOBWZuw9wJ/Hunjik3a9T/
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIByjCCAVCgAwIBAgIBATAKBggqhkjOPQQDAzAuMQswCQYDVQQGEwJFVTENMAsG
+A1UEChMEVGVzdDEQMA4GA1UEAxMHVGVzdCBDQTAeFw0yMjA4MTUwOTE3MTFaFw0y
+MjA4MTYwOTE3MTFaMC4xCzAJBgNVBAYTAkVVMQ0wCwYDVQQKEwRUZXN0MRAwDgYD
+VQQDEwdUZXN0IENBMHYwEAYHKoZIzj0CAQYFK4EEACIDYgAEf96tstMNdNoNfYjl
+bGY6BvBFTsl9E3hpPnta7SJn6BqIYz6KEohDJ+8DXwUMVb5Ytr/QkEikg966HCY3
+A9TFBUdAs01TV8f2KoAPRQVrh+ccSLLJyACENfZ5VbGSQ0wso0IwQDAOBgNVHQ8B
+Af8EBAMCAQYwDwYDVR0TAQH/BAUwAwEB/zAdBgNVHQ4EFgQUs7vtuA+BkwrPXUMF
+UNRe+00Z4GcwCgYIKoZIzj0EAwMDaAAwZQIxAMPgE/Z+1Dcj+lH7jioE16Hig0HQ
+FC4qBx1UU05H05Gs23ECB1hzD2qXikVpaNyuDgIwbogEu42wIwpDa5xdJIZcIhmz
+DIuPvEscUDjU3C+1GPxmACcRMPv9QVUEcBAvZkfn
+-----END CERTIFICATE-----
+----
+
+Then you can configure heimdall to use it like follows:
+
+[source, yaml]
+----
+signer:
+  name: foobar
+  key_store:
+    path: /opt/heimdall/keystore.pem
+  key_id: foo
+----
+====
+
+== Subject
+
+This configuration type enables extraction of subject information from responses received by Heimdall from authentication services. Following properties are available.
+
+* *`id`*: _string_ (mandatory)
++
+A https://github.com/tidwall/gjson/blob/master/SYNTAX.md[GJSON Path] pointing to the id of the subject in the JSON object.
+
+* *`attributes`*: _string_ (optional)
++
+A https://github.com/tidwall/gjson/blob/master/SYNTAX.md[GJSON Path] pointing to the attributes of the subject in the JSON object. Defaults to `@this`.
+
+.Extracting subject id from an https://tools.ietf.org/html/rfc7662[OAuth2 Introspection] endpoint response.
+====
+
+This example shows how to extract the subject id from an https://tools.ietf.org/html/rfc7662[OAuth2 Introspection] endpoint response and set the subject attributes to the entire response
+
+[source, yaml]
+----
+id: sub
+attributes: @this
+----
+
+Setting `attributes` was actually not required, as `@this` would be set by default anyway.
+====
+
+.Extracting subject id from an https://www.ory.sh/docs/kratos/[Ory Kratos] "whoami" endpoint response
+====
+
+This example shows how to extract the subject id from an https://www.ory.sh/docs/kratos/[Ory Kratos] "whoami" endpoint response and set the subject attributes to the entire response. `attributes` is not configured, so default is used.
+
+[source, yaml]
+----
+id: identity.id
+----
+====
+
 
 == TLS
 Following are the supported TLS configuration properties:

@@ -29,16 +29,14 @@ import (
 func TestExtractHeaderValue(t *testing.T) {
 	t.Parallel()
 
-	for _, tc := range []struct {
-		uc             string
+	for uc, tc := range map[string]struct {
 		strategy       HeaderValueExtractStrategy
-		configureMocks func(t *testing.T, ctx *mocks.ContextMock)
+		configureMocks func(t *testing.T, ctx *mocks.RequestContextMock)
 		assert         func(t *testing.T, err error, authData string)
 	}{
-		{
-			uc:       "header is present, scheme is irrelevant",
+		"header is present, scheme is irrelevant": {
 			strategy: HeaderValueExtractStrategy{Name: "X-Test-Header"},
-			configureMocks: func(t *testing.T, ctx *mocks.ContextMock) {
+			configureMocks: func(t *testing.T, ctx *mocks.RequestContextMock) {
 				t.Helper()
 
 				fnt := mocks.NewRequestFunctionsMock(t)
@@ -53,10 +51,9 @@ func TestExtractHeaderValue(t *testing.T) {
 				assert.Equal(t, "TestValue", authData)
 			},
 		},
-		{
-			uc:       "scheme is required, header is present, but without any scheme",
+		"scheme is required, header is present, but without any scheme": {
 			strategy: HeaderValueExtractStrategy{Name: "X-Test-Header", Scheme: "Foo"},
-			configureMocks: func(t *testing.T, ctx *mocks.ContextMock) {
+			configureMocks: func(t *testing.T, ctx *mocks.RequestContextMock) {
 				t.Helper()
 
 				fnt := mocks.NewRequestFunctionsMock(t)
@@ -69,13 +66,12 @@ func TestExtractHeaderValue(t *testing.T) {
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrArgument)
-				assert.Contains(t, err.Error(), "'Foo' scheme")
+				require.ErrorContains(t, err, "'Foo' scheme")
 			},
 		},
-		{
-			uc:       "scheme is required, header is present, but with different scheme",
+		"scheme is required, header is present, but with different scheme": {
 			strategy: HeaderValueExtractStrategy{Name: "X-Test-Header", Scheme: "Foo"},
-			configureMocks: func(t *testing.T, ctx *mocks.ContextMock) {
+			configureMocks: func(t *testing.T, ctx *mocks.RequestContextMock) {
 				t.Helper()
 
 				fnt := mocks.NewRequestFunctionsMock(t)
@@ -88,13 +84,12 @@ func TestExtractHeaderValue(t *testing.T) {
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrArgument)
-				assert.Contains(t, err.Error(), "'Foo' scheme")
+				require.ErrorContains(t, err, "'Foo' scheme")
 			},
 		},
-		{
-			uc:       "header with required scheme is present",
+		"header with required scheme is present": {
 			strategy: HeaderValueExtractStrategy{Name: "X-Test-Header", Scheme: "Foo"},
-			configureMocks: func(t *testing.T, ctx *mocks.ContextMock) {
+			configureMocks: func(t *testing.T, ctx *mocks.RequestContextMock) {
 				t.Helper()
 
 				fnt := mocks.NewRequestFunctionsMock(t)
@@ -109,10 +104,9 @@ func TestExtractHeaderValue(t *testing.T) {
 				assert.Equal(t, "TestValue", authData)
 			},
 		},
-		{
-			uc:       "header is not present at all",
+		"header is not present at all": {
 			strategy: HeaderValueExtractStrategy{Name: "X-Test-Header", Scheme: "Foo"},
-			configureMocks: func(t *testing.T, ctx *mocks.ContextMock) {
+			configureMocks: func(t *testing.T, ctx *mocks.RequestContextMock) {
 				t.Helper()
 
 				fnt := mocks.NewRequestFunctionsMock(t)
@@ -125,13 +119,13 @@ func TestExtractHeaderValue(t *testing.T) {
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrArgument)
-				assert.Contains(t, err.Error(), "no 'X-Test-Header' header")
+				require.ErrorContains(t, err, "no 'X-Test-Header' header")
 			},
 		},
 	} {
-		t.Run("case="+tc.uc, func(t *testing.T) {
+		t.Run(uc, func(t *testing.T) {
 			// GIVEN
-			ctx := mocks.NewContextMock(t)
+			ctx := mocks.NewRequestContextMock(t)
 			tc.configureMocks(t, ctx)
 
 			// WHEN

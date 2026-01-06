@@ -29,16 +29,14 @@ import (
 func TestExtractBodyParameter(t *testing.T) {
 	t.Parallel()
 
-	for _, tc := range []struct {
-		uc             string
+	for uc, tc := range map[string]struct {
 		parameterName  string
-		configureMocks func(t *testing.T, ctx *mocks.ContextMock)
+		configureMocks func(t *testing.T, ctx *mocks.RequestContextMock)
 		assert         func(t *testing.T, err error, authData string)
 	}{
-		{
-			uc:            "body is a string",
+		"body is a string": {
 			parameterName: "foobar",
-			configureMocks: func(t *testing.T, ctx *mocks.ContextMock) {
+			configureMocks: func(t *testing.T, ctx *mocks.RequestContextMock) {
 				t.Helper()
 
 				fnt := mocks.NewRequestFunctionsMock(t)
@@ -51,13 +49,12 @@ func TestExtractBodyParameter(t *testing.T) {
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrArgument)
-				assert.Contains(t, err.Error(), "no usable body present")
+				require.ErrorContains(t, err, "no usable body present")
 			},
 		},
-		{
-			uc:            "json body does not contain required parameter",
+		"json body does not contain required parameter": {
 			parameterName: "foobar",
-			configureMocks: func(t *testing.T, ctx *mocks.ContextMock) {
+			configureMocks: func(t *testing.T, ctx *mocks.RequestContextMock) {
 				t.Helper()
 
 				fnt := mocks.NewRequestFunctionsMock(t)
@@ -70,13 +67,12 @@ func TestExtractBodyParameter(t *testing.T) {
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrArgument)
-				assert.Contains(t, err.Error(), "no foobar parameter present")
+				require.ErrorContains(t, err, "no foobar parameter present")
 			},
 		},
-		{
-			uc:            "form url encoded body does not contain required parameter",
+		"form url encoded body does not contain required parameter": {
 			parameterName: "foobar",
-			configureMocks: func(t *testing.T, ctx *mocks.ContextMock) {
+			configureMocks: func(t *testing.T, ctx *mocks.RequestContextMock) {
 				t.Helper()
 
 				fnt := mocks.NewRequestFunctionsMock(t)
@@ -89,13 +85,12 @@ func TestExtractBodyParameter(t *testing.T) {
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrArgument)
-				assert.Contains(t, err.Error(), "no foobar parameter present")
+				require.ErrorContains(t, err, "no foobar parameter present")
 			},
 		},
-		{
-			uc:            "body contains required parameter multiple times #1",
+		"body contains required parameter multiple times #1": {
 			parameterName: "foobar",
-			configureMocks: func(t *testing.T, ctx *mocks.ContextMock) {
+			configureMocks: func(t *testing.T, ctx *mocks.RequestContextMock) {
 				t.Helper()
 
 				fnt := mocks.NewRequestFunctionsMock(t)
@@ -108,13 +103,12 @@ func TestExtractBodyParameter(t *testing.T) {
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrArgument)
-				assert.Contains(t, err.Error(), "multiple times")
+				require.ErrorContains(t, err, "multiple times")
 			},
 		},
-		{
-			uc:            "body contains required parameter multiple times #2",
+		"body contains required parameter multiple times #2": {
 			parameterName: "foobar",
-			configureMocks: func(t *testing.T, ctx *mocks.ContextMock) {
+			configureMocks: func(t *testing.T, ctx *mocks.RequestContextMock) {
 				t.Helper()
 
 				fnt := mocks.NewRequestFunctionsMock(t)
@@ -127,13 +121,12 @@ func TestExtractBodyParameter(t *testing.T) {
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrArgument)
-				assert.Contains(t, err.Error(), "multiple times")
+				require.ErrorContains(t, err, "multiple times")
 			},
 		},
-		{
-			uc:            "body contains required parameter in wrong format #1",
+		"body contains required parameter in wrong format #1": {
 			parameterName: "foobar",
-			configureMocks: func(t *testing.T, ctx *mocks.ContextMock) {
+			configureMocks: func(t *testing.T, ctx *mocks.RequestContextMock) {
 				t.Helper()
 
 				fnt := mocks.NewRequestFunctionsMock(t)
@@ -146,13 +139,12 @@ func TestExtractBodyParameter(t *testing.T) {
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrArgument)
-				assert.Contains(t, err.Error(), "unexpected type")
+				require.ErrorContains(t, err, "unexpected type")
 			},
 		},
-		{
-			uc:            "body contains required parameter in wrong format #2",
+		"body contains required parameter in wrong format #2": {
 			parameterName: "foobar",
-			configureMocks: func(t *testing.T, ctx *mocks.ContextMock) {
+			configureMocks: func(t *testing.T, ctx *mocks.RequestContextMock) {
 				t.Helper()
 
 				fnt := mocks.NewRequestFunctionsMock(t)
@@ -165,13 +157,12 @@ func TestExtractBodyParameter(t *testing.T) {
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrArgument)
-				assert.Contains(t, err.Error(), "unexpected type")
+				require.ErrorContains(t, err, "unexpected type")
 			},
 		},
-		{
-			uc:            "body contains required parameter #1",
+		"body contains required parameter #1": {
 			parameterName: "foobar",
-			configureMocks: func(t *testing.T, ctx *mocks.ContextMock) {
+			configureMocks: func(t *testing.T, ctx *mocks.RequestContextMock) {
 				t.Helper()
 
 				fnt := mocks.NewRequestFunctionsMock(t)
@@ -186,10 +177,9 @@ func TestExtractBodyParameter(t *testing.T) {
 				assert.Equal(t, "foo", authData)
 			},
 		},
-		{
-			uc:            "form url encoded body contains required parameter",
+		"form url encoded body contains required parameter": {
 			parameterName: "foobar",
-			configureMocks: func(t *testing.T, ctx *mocks.ContextMock) {
+			configureMocks: func(t *testing.T, ctx *mocks.RequestContextMock) {
 				t.Helper()
 
 				fnt := mocks.NewRequestFunctionsMock(t)
@@ -205,9 +195,9 @@ func TestExtractBodyParameter(t *testing.T) {
 			},
 		},
 	} {
-		t.Run("case="+tc.uc, func(t *testing.T) {
+		t.Run(uc, func(t *testing.T) {
 			// GIVEN
-			ctx := mocks.NewContextMock(t)
+			ctx := mocks.NewRequestContextMock(t)
 			tc.configureMocks(t, ctx)
 
 			strategy := BodyParameterExtractStrategy{Name: tc.parameterName}

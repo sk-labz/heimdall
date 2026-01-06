@@ -1,13 +1,44 @@
 {
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
-    "config:base",
-    ":semanticCommits",
-    ":semanticCommitTypeAll(deps)",
-    ":semanticCommitScopeDisabled"
+    "config:recommended",
+    ":semanticCommitScopeDisabled",
+    ":semanticCommitTypeAll(chore)",
+    "docker:pinDigests",
+    "helpers:pinGitHubActionDigests",
+    ":pinDevDependencies"
   ],
-  "baseBranches": ["release"],
+  "packageRules": [
+    {
+      "matchCategories": [
+        "golang"
+      ],
+      "semanticCommitType": "deps"
+    },
+    {
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchFileNames": [
+        ".github/workflows/release.yaml"
+      ],
+      "matchPackageNames": [
+        "slsa-framework/slsa-github-generator"
+      ],
+      "pinDigests": false
+    }
+  ],
+  "configMigration": true,
+  "baseBranchPatterns": [
+    "release"
+  ],
   "assigneesFromCodeOwners": true,
-  "addLabels": ["dependency"],
+  "addLabels": [
+    "dependency"
+  ],
   "automerge": false,
-  "commitMessageAction": "Update"
+  "ignorePaths": [
+    "charts/heimdall/**",
+    "examples/**"
+  ]
 }

@@ -31,7 +31,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/sdk/resource"
-	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	rpc_status "google.golang.org/genproto/googleapis/rpc/status"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -51,13 +51,11 @@ func attributeValue(set attribute.Set, key attribute.Key) attribute.Value {
 }
 
 func TestHandlerObserveKnownRequests(t *testing.T) {
-	for _, tc := range []struct {
-		uc            string
+	for uc, tc := range map[string]struct {
 		configureMock func(t *testing.T, srv *mocks2.MockHandler)
 		assert        func(t *testing.T, rm *metricdata.ResourceMetrics)
 	}{
-		{
-			uc: "metrics for successful request",
+		"metrics for successful request": {
 			configureMock: func(t *testing.T, handler *mocks2.MockHandler) {
 				t.Helper()
 
@@ -101,12 +99,11 @@ func TestHandlerObserveKnownRequests(t *testing.T) {
 				assert.Equal(t, "heimdall.local",
 					attributeValue(activeRequests.DataPoints[0].Attributes, "server.address").AsString())
 				assert.True(t, activeRequests.DataPoints[0].Attributes.HasValue("server.port"))
-				assert.True(t, activeRequests.DataPoints[0].Attributes.HasValue(semconv.NetSockPeerAddrKey))
-				assert.True(t, activeRequests.DataPoints[0].Attributes.HasValue(semconv.NetSockPeerPortKey))
+				assert.True(t, activeRequests.DataPoints[0].Attributes.HasValue(semconv.NetworkPeerAddressKey))
+				assert.True(t, activeRequests.DataPoints[0].Attributes.HasValue(semconv.NetworkPeerPortKey))
 			},
 		},
-		{
-			uc: "metrics for request which failed with 403",
+		"metrics for request which failed with 403": {
 			configureMock: func(t *testing.T, handler *mocks2.MockHandler) {
 				t.Helper()
 
@@ -152,12 +149,11 @@ func TestHandlerObserveKnownRequests(t *testing.T) {
 				assert.Equal(t, "heimdall.local",
 					attributeValue(activeRequests.DataPoints[0].Attributes, "server.address").AsString())
 				assert.True(t, activeRequests.DataPoints[0].Attributes.HasValue("server.port"))
-				assert.True(t, activeRequests.DataPoints[0].Attributes.HasValue(semconv.NetSockPeerAddrKey))
-				assert.True(t, activeRequests.DataPoints[0].Attributes.HasValue(semconv.NetSockPeerPortKey))
+				assert.True(t, activeRequests.DataPoints[0].Attributes.HasValue(semconv.NetworkPeerAddressKey))
+				assert.True(t, activeRequests.DataPoints[0].Attributes.HasValue(semconv.NetworkPeerPortKey))
 			},
 		},
-		{
-			uc: "metrics for request with server raising an error",
+		"metrics for request with server raising an error": {
 			configureMock: func(t *testing.T, handler *mocks2.MockHandler) {
 				t.Helper()
 
@@ -197,12 +193,12 @@ func TestHandlerObserveKnownRequests(t *testing.T) {
 				assert.Equal(t, "heimdall.local",
 					attributeValue(activeRequests.DataPoints[0].Attributes, "server.address").AsString())
 				assert.True(t, activeRequests.DataPoints[0].Attributes.HasValue("server.port"))
-				assert.True(t, activeRequests.DataPoints[0].Attributes.HasValue(semconv.NetSockPeerAddrKey))
-				assert.True(t, activeRequests.DataPoints[0].Attributes.HasValue(semconv.NetSockPeerPortKey))
+				assert.True(t, activeRequests.DataPoints[0].Attributes.HasValue(semconv.NetworkPeerAddressKey))
+				assert.True(t, activeRequests.DataPoints[0].Attributes.HasValue(semconv.NetworkPeerPortKey))
 			},
 		},
 	} {
-		t.Run(tc.uc, func(t *testing.T) {
+		t.Run(uc, func(t *testing.T) {
 			// GIVEN
 			exp := metric.NewManualReader()
 
@@ -213,7 +209,7 @@ func TestHandlerObserveKnownRequests(t *testing.T) {
 
 			lis := bufconn.Listen(1024 * 1024)
 			handler := &mocks2.MockHandler{}
-			conn, err := grpc.DialContext(context.Background(), "bufnet",
+			conn, err := grpc.NewClient("passthrough://bufnet",
 				grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }),
 				grpc.WithTransportCredentials(insecure.NewCredentials()))
 			require.NoError(t, err)
@@ -238,7 +234,7 @@ func TestHandlerObserveKnownRequests(t *testing.T) {
 
 			// WHEN
 			// we're not interested in the response and the error
-			client.Check(context.Background(), &envoy_auth.CheckRequest{
+			client.Check(t.Context(), &envoy_auth.CheckRequest{
 				Attributes: &envoy_auth.AttributeContext{
 					Request: &envoy_auth.AttributeContext_Request{
 						Http: &envoy_auth.AttributeContext_HttpRequest{
@@ -255,7 +251,7 @@ func TestHandlerObserveKnownRequests(t *testing.T) {
 
 			var rm metricdata.ResourceMetrics
 
-			err = exp.Collect(context.TODO(), &rm)
+			err = exp.Collect(t.Context(), &rm)
 			require.NoError(t, err)
 
 			tc.assert(t, &rm)
@@ -275,7 +271,7 @@ func TestHandlerObserveUnknownRequests(t *testing.T) {
 
 	lis := bufconn.Listen(1024 * 1024)
 	handler := &mocks2.MockHandler{}
-	conn, err := grpc.DialContext(context.Background(), "bufnet",
+	conn, err := grpc.NewClient("passthrough://bufnet",
 		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }),
 		grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
@@ -304,16 +300,16 @@ func TestHandlerObserveUnknownRequests(t *testing.T) {
 
 	// WHEN
 	// we're not interested in the response and the error
-	_, err = client.Test(context.Background(), &mocks2.TestRequest{})
+	_, err = client.Test(t.Context(), &mocks2.TestRequest{})
 
 	// THEN
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "unknown service or method")
+	require.ErrorContains(t, err, "unknown service or method")
 	srv.Stop()
 
 	var rm metricdata.ResourceMetrics
 
-	err = exp.Collect(context.TODO(), &rm)
+	err = exp.Collect(t.Context(), &rm)
 	require.NoError(t, err)
 	handler.AssertExpectations(t)
 
@@ -347,6 +343,6 @@ func TestHandlerObserveUnknownRequests(t *testing.T) {
 	assert.Equal(t, "127.0.0.1",
 		attributeValue(activeRequests.DataPoints[0].Attributes, "server.address").AsString())
 	assert.True(t, activeRequests.DataPoints[0].Attributes.HasValue("server.port"))
-	assert.True(t, activeRequests.DataPoints[0].Attributes.HasValue(semconv.NetSockPeerAddrKey))
-	assert.True(t, activeRequests.DataPoints[0].Attributes.HasValue(semconv.NetSockPeerPortKey))
+	assert.True(t, activeRequests.DataPoints[0].Attributes.HasValue(semconv.NetworkPeerAddressKey))
+	assert.True(t, activeRequests.DataPoints[0].Attributes.HasValue(semconv.NetworkPeerAddressKey))
 }

@@ -37,10 +37,10 @@ func TestExtractQueryParameter(t *testing.T) {
 
 	fnt := mocks.NewRequestFunctionsMock(t)
 
-	ctx := mocks.NewContextMock(t)
+	ctx := mocks.NewRequestContextMock(t)
 	ctx.EXPECT().Request().Return(&heimdall.Request{
 		RequestFunctions: fnt,
-		URL:              &url.URL{RawQuery: fmt.Sprintf("%s=%s", queryParam, queryParamValue)},
+		URL:              &heimdall.URL{URL: url.URL{RawQuery: fmt.Sprintf("%s=%s", queryParam, queryParamValue)}},
 	})
 
 	strategy := QueryParameterExtractStrategy{Name: queryParam}
@@ -59,10 +59,10 @@ func TestExtractNotExistingQueryParameterValue(t *testing.T) {
 	// GIVEN
 	fnt := mocks.NewRequestFunctionsMock(t)
 
-	ctx := mocks.NewContextMock(t)
+	ctx := mocks.NewRequestContextMock(t)
 	ctx.EXPECT().Request().Return(&heimdall.Request{
 		RequestFunctions: fnt,
-		URL:              &url.URL{},
+		URL:              &heimdall.URL{},
 	})
 
 	strategy := QueryParameterExtractStrategy{Name: "Test-Cookie"}

@@ -28,8 +28,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-//go:generate mockery --name Handler --structname HandlerMock --inpackage --testonly
-
 type Handler interface {
 	Handle(ctx context.Context, req *Request) *Response
 }
@@ -68,6 +66,7 @@ func (wh *Webhook) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 			log.Warn().Err(err).Msg("Failed parsing timeout query parameter. Ignoring it.")
 		} else {
 			var cancel context.CancelFunc
+
 			ctx, cancel = context.WithTimeout(ctx, timeout)
 
 			defer cancel()

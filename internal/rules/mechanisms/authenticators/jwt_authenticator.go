@@ -32,6 +32,7 @@ import (
 	"github.com/goccy/go-json"
 	"github.com/rs/zerolog"
 
+	"github.com/dadrus/heimdall/internal/app"
 	"github.com/dadrus/heimdall/internal/cache"
 	"github.com/dadrus/heimdall/internal/heimdall"
 	"github.com/dadrus/heimdall/internal/rules/endpoint"
@@ -53,50 +54,78 @@ const defaultJWTAuthenticatorTTL = 10 * time.Minute
 //nolint:gochecknoinits
 func init() {
 	registerTypeFactory(
-		func(id string, typ string, conf map[string]any) (bool, Authenticator, error) {
-			if typ != AuthenticatorJwt {
+		func(app app.Context, name string, typ string, conf map[string]any) (bool, Authenticator, error) {
+			if typ != AuthenticatorJWT {
 				return false, nil, nil
 			}
 
-			auth, err := newJwtAuthenticator(id, conf)
+			auth, err := newJwtAuthenticator(app, name, conf)
 
 			return true, auth, err
 		})
 }
 
 type jwtAuthenticator struct {
-	id                   string
-	r                    oauth2.ServerMetadataResolver
-	a                    oauth2.Expectation
-	ttl                  *time.Duration
-	sf                   SubjectFactory
-	ads                  extractors.AuthDataExtractStrategy
-	allowFallbackOnError bool
-	trustStore           truststore.TrustStore
-	validateJWKCert      bool
+	name            string
+	id              string
+	app             app.Context
+	r               oauth2.ServerMetadataResolver
+	a               oauth2.Expectation
+	ttl             *time.Duration
+	sf              SubjectFactory
+	ads             extractors.AuthDataExtractStrategy
+	trustStore      truststore.TrustStore
+	validateJWKCert bool
 }
 
-func newJwtAuthenticator(id string, rawConfig map[string]any) (*jwtAuthenticator, error) { // nolint: funlen
+// nolint: funlen, cyclop
+func newJwtAuthenticator(
+	app app.Context,
+	name string,
+	rawConfig map[string]any,
+) (*jwtAuthenticator, error) { // nolint: funlen
+	logger := app.Logger()
+	logger.Info().
+		Str("_type", AuthenticatorJWT).
+		Str("_name", name).
+		Msg("Creating authenticator")
+
 	type Config struct {
-		JWKSEndpoint         *endpoint.Endpoint                  `mapstructure:"jwks_endpoint"        validate:"required_without=MetadataEndpoint,excluded_with=MetadataEndpoint"` //nolint:lll,tagalign
-		MetadataEndpoint     *oauth2.MetadataEndpoint            `mapstructure:"metadata_endpoint"    validate:"required_without=JWKSEndpoint,excluded_with=JWKSEndpoint"`         //nolint:lll,tagalign
-		Assertions           oauth2.Expectation                  `mapstructure:"assertions"           validate:"required_with=JWKSEndpoint"`                                       //nolint:lll,tagalign
-		SubjectInfo          SubjectInfo                         `mapstructure:"subject"              validate:"-"`                                                                //nolint:lll,tagalign
-		AuthDataSource       extractors.CompositeExtractStrategy `mapstructure:"jwt_source"`
-		CacheTTL             *time.Duration                      `mapstructure:"cache_ttl"`
-		AllowFallbackOnError bool                                `mapstructure:"allow_fallback_on_error"`
-		ValidateJWK          *bool                               `mapstructure:"validate_jwk"`
-		TrustStore           truststore.TrustStore               `mapstructure:"trust_store"`
+		JWKSEndpoint     *endpoint.Endpoint                  `mapstructure:"jwks_endpoint"        validate:"required_without=MetadataEndpoint,excluded_with=MetadataEndpoint"` //nolint:lll,tagalign
+		MetadataEndpoint *oauth2.MetadataEndpoint            `mapstructure:"metadata_endpoint"    validate:"required_without=JWKSEndpoint,excluded_with=JWKSEndpoint"`         //nolint:lll,tagalign
+		Assertions       oauth2.Expectation                  `mapstructure:"assertions"           validate:"required_with=JWKSEndpoint"`                                       //nolint:lll,tagalign
+		SubjectInfo      SubjectInfo                         `mapstructure:"subject"              validate:"-"`                                                                //nolint:lll,tagalign
+		AuthDataSource   extractors.CompositeExtractStrategy `mapstructure:"jwt_source"`
+		CacheTTL         *time.Duration                      `mapstructure:"cache_ttl"`
+		ValidateJWK      *bool                               `mapstructure:"validate_jwk"`
+		TrustStore       truststore.TrustStore               `mapstructure:"trust_store"`
 	}
 
 	var conf Config
-	if err := decodeConfig(AuthenticatorJwt, rawConfig, &conf); err != nil {
-		return nil, err
+	if err := decodeConfig(app, rawConfig, &conf); err != nil {
+		return nil, errorchain.NewWithMessagef(heimdall.ErrConfiguration,
+			"failed decoding config for jwt authenticator '%s'", name).CausedBy(err)
 	}
 
-	if conf.JWKSEndpoint != nil && len(conf.Assertions.TrustedIssuers) == 0 {
-		return nil, errorchain.
-			NewWithMessage(heimdall.ErrConfiguration, "'issuers' is a required field if JWKS endpoint is used")
+	if conf.JWKSEndpoint != nil {
+		if len(conf.Assertions.TrustedIssuers) == 0 {
+			return nil, errorchain.
+				NewWithMessage(heimdall.ErrConfiguration, "'issuers' is a required field if JWKS endpoint is used")
+		}
+
+		if strings.HasPrefix(conf.JWKSEndpoint.URL, "http://") {
+			logger.Warn().
+				Str("_type", AuthenticatorJWT).
+				Str("_name", name).
+				Msg("No TLS configured for the jwks endpoint used in authenticator")
+		}
+	}
+
+	if conf.MetadataEndpoint != nil && strings.HasPrefix(conf.MetadataEndpoint.URL, "http://") {
+		logger.Warn().
+			Str("_type", AuthenticatorJWT).
+			Str("_name", name).
+			Msg("No TLS configured for the metadata endpoint used in authenticator")
 	}
 
 	if len(conf.Assertions.AllowedAlgorithms) == 0 {
@@ -152,21 +181,26 @@ func newJwtAuthenticator(id string, rawConfig map[string]any) (*jwtAuthenticator
 	)
 
 	return &jwtAuthenticator{
-		id:                   id,
-		r:                    resolver,
-		a:                    conf.Assertions,
-		ttl:                  conf.CacheTTL,
-		sf:                   &conf.SubjectInfo,
-		ads:                  ads,
-		allowFallbackOnError: conf.AllowFallbackOnError,
-		validateJWKCert:      validateJWKCert,
-		trustStore:           conf.TrustStore,
+		name:            name,
+		id:              name,
+		app:             app,
+		r:               resolver,
+		a:               conf.Assertions,
+		ttl:             conf.CacheTTL,
+		sf:              &conf.SubjectInfo,
+		ads:             ads,
+		validateJWKCert: validateJWKCert,
+		trustStore:      conf.TrustStore,
 	}, nil
 }
 
-func (a *jwtAuthenticator) Execute(ctx heimdall.Context) (*subject.Subject, error) {
-	logger := zerolog.Ctx(ctx.AppContext())
-	logger.Debug().Str("_id", a.id).Msg("Authenticating using JWT authenticator")
+func (a *jwtAuthenticator) Execute(ctx heimdall.RequestContext) (*subject.Subject, error) {
+	logger := zerolog.Ctx(ctx.Context())
+	logger.Debug().
+		Str("_type", AuthenticatorJWT).
+		Str("_name", a.name).
+		Str("_id", a.id).
+		Msg("Executing authenticator")
 
 	jwtAd, err := a.ads.GetAuthData(ctx)
 	if err != nil {
@@ -201,45 +235,51 @@ func (a *jwtAuthenticator) Execute(ctx heimdall.Context) (*subject.Subject, erro
 	return sub, nil
 }
 
-func (a *jwtAuthenticator) WithConfig(config map[string]any) (Authenticator, error) {
+func (a *jwtAuthenticator) WithConfig(stepID string, rawConfig map[string]any) (Authenticator, error) {
 	// this authenticator allows assertions and ttl to be redefined on the rule level
-	if len(config) == 0 {
+	if len(stepID) == 0 && len(rawConfig) == 0 {
 		return a, nil
 	}
 
+	if len(rawConfig) == 0 {
+		auth := *a
+		auth.id = stepID
+
+		return &auth, nil
+	}
+
 	type Config struct {
-		Assertions           *oauth2.Expectation `mapstructure:"assertions"              validate:"-"`
-		CacheTTL             *time.Duration      `mapstructure:"cache_ttl"`
-		AllowFallbackOnError *bool               `mapstructure:"allow_fallback_on_error"`
+		Assertions oauth2.Expectation `mapstructure:"assertions" validate:"-"`
+		CacheTTL   *time.Duration     `mapstructure:"cache_ttl"`
 	}
 
 	var conf Config
-	if err := decodeConfig(AuthenticatorJwt, config, &conf); err != nil {
-		return nil, err
+	if err := decodeConfig(a.app, rawConfig, &conf); err != nil {
+		return nil, errorchain.NewWithMessagef(heimdall.ErrConfiguration,
+			"failed decoding config for jwt authenticator '%s'", a.name).CausedBy(err)
 	}
 
 	return &jwtAuthenticator{
-		id:  a.id,
-		r:   a.r,
-		a:   conf.Assertions.Merge(&a.a),
-		ttl: x.IfThenElse(conf.CacheTTL != nil, conf.CacheTTL, a.ttl),
-		sf:  a.sf,
-		ads: a.ads,
-		allowFallbackOnError: x.IfThenElseExec(conf.AllowFallbackOnError != nil,
-			func() bool { return *conf.AllowFallbackOnError },
-			func() bool { return a.allowFallbackOnError }),
+		name:            a.name,
+		id:              x.IfThenElse(len(stepID) == 0, a.id, stepID),
+		app:             a.app,
+		r:               a.r,
+		a:               conf.Assertions.Merge(a.a),
+		ttl:             x.IfThenElse(conf.CacheTTL != nil, conf.CacheTTL, a.ttl),
+		sf:              a.sf,
+		ads:             a.ads,
 		validateJWKCert: a.validateJWKCert,
 		trustStore:      a.trustStore,
 	}, nil
 }
 
-func (a *jwtAuthenticator) IsFallbackOnErrorAllowed() bool {
-	return a.allowFallbackOnError
-}
+func (a *jwtAuthenticator) Name() string { return a.name }
 
 func (a *jwtAuthenticator) ID() string {
 	return a.id
 }
+
+func (a *jwtAuthenticator) IsInsecure() bool { return false }
 
 func (a *jwtAuthenticator) isCacheEnabled() bool {
 	// cache is enabled if ttl is not configured (in that case the ttl value from either
@@ -284,8 +324,11 @@ func (a *jwtAuthenticator) getCacheTTL(key *jose.JSONWebKey) time.Duration {
 	}
 }
 
-func (a *jwtAuthenticator) serverMetadata(ctx heimdall.Context, claims map[string]any) (oauth2.ServerMetadata, error) {
-	metadata, err := a.r.Get(ctx.AppContext(), map[string]any{"TokenIssuer": claims["iss"]})
+func (a *jwtAuthenticator) serverMetadata(
+	ctx heimdall.RequestContext,
+	claims map[string]any,
+) (oauth2.ServerMetadata, error) {
+	metadata, err := a.r.Get(ctx.Context(), map[string]any{"TokenIssuer": claims["iss"]})
 	if err != nil {
 		return oauth2.ServerMetadata{}, errorchain.NewWithMessage(heimdall.ErrInternal,
 			"failed retrieving oauth2 server metadata").CausedBy(err).WithErrorContext(a)
@@ -300,7 +343,7 @@ func (a *jwtAuthenticator) serverMetadata(ctx heimdall.Context, claims map[strin
 	return metadata, nil
 }
 
-func (a *jwtAuthenticator) verifyToken(ctx heimdall.Context, token *jwt.JSONWebToken) (json.RawMessage, error) {
+func (a *jwtAuthenticator) verifyToken(ctx heimdall.RequestContext, token *jwt.JSONWebToken) (json.RawMessage, error) {
 	claims := map[string]any{}
 	if err := token.UnsafeClaimsWithoutVerification(&claims); err != nil {
 		return nil, errorchain.NewWithMessage(heimdall.ErrInternal, "failed to deserialize JWT").
@@ -314,7 +357,7 @@ func (a *jwtAuthenticator) verifyToken(ctx heimdall.Context, token *jwt.JSONWebT
 	}
 
 	// configured assertions take precedence over those available in the metadata
-	assertions := a.a.Merge(&oauth2.Expectation{
+	assertions := a.a.Merge(oauth2.Expectation{
 		TrustedIssuers: []string{metadata.Issuer},
 	})
 
@@ -331,23 +374,23 @@ func (a *jwtAuthenticator) verifyToken(ctx heimdall.Context, token *jwt.JSONWebT
 }
 
 func (a *jwtAuthenticator) verifyTokenWithoutKID(
-	ctx heimdall.Context,
+	ctx heimdall.RequestContext,
 	token *jwt.JSONWebToken,
 	tokenClaims map[string]any,
 	ep *endpoint.Endpoint,
 	assertions *oauth2.Expectation,
 ) (json.RawMessage, error) {
-	logger := zerolog.Ctx(ctx.AppContext())
+	logger := zerolog.Ctx(ctx.Context())
 	logger.Info().Msg("No kid present in the JWT")
 
 	var rawClaims json.RawMessage
 
-	req, err := a.createRequest(ctx.AppContext(), ep, tokenClaims)
+	req, err := a.createRequest(ctx.Context(), ep, tokenClaims)
 	if err != nil {
 		return nil, err
 	}
 
-	jwks, err := a.fetchJWKS(ctx.AppContext(), ep.CreateClient(req.URL.Hostname()), req)
+	jwks, err := a.fetchJWKS(ctx.Context(), ep.CreateClient(req.URL.Hostname()), req)
 	if err != nil {
 		return nil, err
 	}
@@ -355,7 +398,7 @@ func (a *jwtAuthenticator) verifyTokenWithoutKID(
 	for idx := range jwks.Keys {
 		sigKey := jwks.Keys[idx]
 		if err = a.validateJWK(&sigKey); err != nil {
-			logger.Info().Err(err).Str("_key_id", sigKey.KeyID).Msg("JWK is invalid")
+			logger.Warn().Err(err).Str("_key_id", sigKey.KeyID).Msg("JWK is invalid")
 
 			continue
 		}
@@ -365,7 +408,7 @@ func (a *jwtAuthenticator) verifyTokenWithoutKID(
 			break
 		}
 
-		logger.Info().Err(err).Str("_key_id", sigKey.KeyID).Msg("Failed to verify JWT")
+		logger.Warn().Err(err).Str("_key_id", sigKey.KeyID).Msg("Failed to verify JWT")
 	}
 
 	if len(rawClaims) == 0 {
@@ -379,24 +422,24 @@ func (a *jwtAuthenticator) verifyTokenWithoutKID(
 }
 
 func (a *jwtAuthenticator) getKey(
-	ctx heimdall.Context, keyID string, tokenClaims map[string]any, ep *endpoint.Endpoint,
+	ctx heimdall.RequestContext, keyID string, tokenClaims map[string]any, ep *endpoint.Endpoint,
 ) (*jose.JSONWebKey, error) {
-	cch := cache.Ctx(ctx.AppContext())
-	logger := zerolog.Ctx(ctx.AppContext())
+	cch := cache.Ctx(ctx.Context())
+	logger := zerolog.Ctx(ctx.Context())
 
 	var (
 		cacheKey string
 		jwks     *jose.JSONWebKeySet
 	)
 
-	req, err := a.createRequest(ctx.AppContext(), ep, tokenClaims)
+	req, err := a.createRequest(ctx.Context(), ep, tokenClaims)
 	if err != nil {
 		return nil, err
 	}
 
 	if a.isCacheEnabled() {
 		cacheKey = a.calculateCacheKey(ep, req.URL.String(), keyID)
-		if entry, err := cch.Get(ctx.AppContext(), cacheKey); err == nil {
+		if entry, err := cch.Get(ctx.Context(), cacheKey); err == nil {
 			var jwk jose.JSONWebKey
 
 			if err = json.Unmarshal(entry, &jwk); err == nil {
@@ -407,7 +450,7 @@ func (a *jwtAuthenticator) getKey(
 		}
 	}
 
-	jwks, err = a.fetchJWKS(ctx.AppContext(), ep.CreateClient(req.URL.Hostname()), req)
+	jwks, err = a.fetchJWKS(ctx.Context(), ep.CreateClient(req.URL.Hostname()), req)
 	if err != nil {
 		return nil, err
 	}
@@ -431,7 +474,7 @@ func (a *jwtAuthenticator) getKey(
 	if cacheTTL := a.getCacheTTL(jwk); cacheTTL > 0 {
 		data, _ := json.Marshal(jwk)
 
-		if err = cch.Set(ctx.AppContext(), cacheKey, data, cacheTTL); err != nil {
+		if err = cch.Set(ctx.Context(), cacheKey, data, cacheTTL); err != nil {
 			logger.Warn().Err(err).Msg("Failed to cache JWK")
 		}
 	}
@@ -495,7 +538,7 @@ func (a *jwtAuthenticator) createRequest(
 }
 
 func (a *jwtAuthenticator) readJWKS(resp *http.Response) (*jose.JSONWebKeySet, error) {
-	if !(resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices) {
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return nil, errorchain.
 			NewWithMessagef(heimdall.ErrCommunication, "unexpected response. code: %v", resp.StatusCode).
 			WithErrorContext(a)

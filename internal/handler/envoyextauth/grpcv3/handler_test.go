@@ -40,13 +40,11 @@ import (
 )
 
 func TestHandleDecisionEndpointRequest(t *testing.T) {
-	for _, tc := range []struct {
-		uc             string
+	for uc, tc := range map[string]struct {
 		configureMocks func(t *testing.T, exec *mocks2.ExecutorMock)
 		assertResponse func(t *testing.T, err error, response *envoy_auth.CheckResponse)
 	}{
-		{
-			uc: "no rules configured",
+		"no rules configured": {
 			configureMocks: func(t *testing.T, exec *mocks2.ExecutorMock) {
 				t.Helper()
 
@@ -65,28 +63,26 @@ func TestHandleDecisionEndpointRequest(t *testing.T) {
 				assert.Empty(t, deniedResponse.GetHeaders())
 			},
 		},
-		{
-			uc: "rule doesn't match method",
+		"rule doesn't match method": {
 			configureMocks: func(t *testing.T, exec *mocks2.ExecutorMock) {
 				t.Helper()
 
-				exec.EXPECT().Execute(mock.Anything).Return(nil, heimdall.ErrMethodNotAllowed)
+				exec.EXPECT().Execute(mock.Anything).Return(nil, heimdall.ErrNoRuleFound)
 			},
 			assertResponse: func(t *testing.T, err error, response *envoy_auth.CheckResponse) {
 				t.Helper()
 
 				require.NoError(t, err)
-				assert.Equal(t, int32(codes.InvalidArgument), response.GetStatus().GetCode())
+				assert.Equal(t, int32(codes.NotFound), response.GetStatus().GetCode())
 
 				deniedResponse := response.GetDeniedResponse()
 				require.NotNil(t, deniedResponse)
-				assert.Equal(t, typev3.StatusCode(http.StatusMethodNotAllowed), deniedResponse.GetStatus().GetCode())
+				assert.Equal(t, typev3.StatusCode(http.StatusNotFound), deniedResponse.GetStatus().GetCode())
 				assert.Empty(t, deniedResponse.GetBody())
 				assert.Empty(t, deniedResponse.GetHeaders())
 			},
 		},
-		{
-			uc: "rule execution fails with authentication error",
+		"rule execution fails with authentication error": {
 			configureMocks: func(t *testing.T, exec *mocks2.ExecutorMock) {
 				t.Helper()
 
@@ -105,8 +101,7 @@ func TestHandleDecisionEndpointRequest(t *testing.T) {
 				assert.Empty(t, deniedResponse.GetHeaders())
 			},
 		},
-		{
-			uc: "rule execution fails with authorization error",
+		"rule execution fails with authorization error": {
 			configureMocks: func(t *testing.T, exec *mocks2.ExecutorMock) {
 				t.Helper()
 
@@ -125,8 +120,7 @@ func TestHandleDecisionEndpointRequest(t *testing.T) {
 				assert.Empty(t, deniedResponse.GetHeaders())
 			},
 		},
-		{
-			uc: "rule execution fails with a redirect",
+		"rule execution fails with a redirect": {
 			configureMocks: func(t *testing.T, exec *mocks2.ExecutorMock) {
 				t.Helper()
 
@@ -151,13 +145,12 @@ func TestHandleDecisionEndpointRequest(t *testing.T) {
 				assert.Equal(t, "http://foo.bar", deniedResponse.GetHeaders()[0].GetHeader().GetValue())
 			},
 		},
-		{
-			uc: "rule execution succeeds",
+		"rule execution succeeds": {
 			configureMocks: func(t *testing.T, exec *mocks2.ExecutorMock) {
 				t.Helper()
 
 				exec.EXPECT().Execute(
-					mock.MatchedBy(func(ctx heimdall.Context) bool {
+					mock.MatchedBy(func(ctx heimdall.RequestContext) bool {
 						req := ctx.Request()
 
 						return req.URL.Path == "/test" &&
@@ -176,8 +169,7 @@ func TestHandleDecisionEndpointRequest(t *testing.T) {
 				assert.Empty(t, okResponse.GetHeaders())
 			},
 		},
-		{
-			uc: "server panics and error does not contain traces",
+		"server panics and error does not contain traces": {
 			configureMocks: func(t *testing.T, exec *mocks2.ExecutorMock) {
 				t.Helper()
 
@@ -191,10 +183,10 @@ func TestHandleDecisionEndpointRequest(t *testing.T) {
 			},
 		},
 	} {
-		t.Run("case="+tc.uc, func(t *testing.T) {
+		t.Run(uc, func(t *testing.T) {
 			// GIVEN
 			lis := bufconn.Listen(1024 * 1024)
-			conn, err := grpc.DialContext(context.Background(), "bufnet",
+			conn, err := grpc.NewClient("passthrough://bufnet",
 				grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }),
 				grpc.WithTransportCredentials(insecure.NewCredentials()))
 			require.NoError(t, err)
@@ -205,7 +197,7 @@ func TestHandleDecisionEndpointRequest(t *testing.T) {
 
 			tc.configureMocks(t, exec)
 
-			srv := newService(conf, cch, log.Logger, exec, nil)
+			srv := newService(conf, cch, log.Logger, exec)
 
 			defer srv.Stop()
 
@@ -216,7 +208,7 @@ func TestHandleDecisionEndpointRequest(t *testing.T) {
 			client := envoy_auth.NewAuthorizationClient(conn)
 
 			// WHEN
-			resp, err := client.Check(context.Background(), &envoy_auth.CheckRequest{
+			resp, err := client.Check(t.Context(), &envoy_auth.CheckRequest{
 				Attributes: &envoy_auth.AttributeContext{
 					Request: &envoy_auth.AttributeContext_Request{
 						Http: &envoy_auth.AttributeContext_HttpRequest{

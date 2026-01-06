@@ -30,8 +30,8 @@ type conditionalSubjectHandler struct {
 	c executionCondition
 }
 
-func (h *conditionalSubjectHandler) Execute(ctx heimdall.Context, sub *subject.Subject) error {
-	logger := zerolog.Ctx(ctx.AppContext())
+func (h *conditionalSubjectHandler) Execute(ctx heimdall.RequestContext, sub *subject.Subject) error {
+	logger := zerolog.Ctx(ctx.Context())
 
 	logger.Debug().Str("_id", h.h.ID()).Msg("Checking execution condition")
 
@@ -44,7 +44,7 @@ func (h *conditionalSubjectHandler) Execute(ctx heimdall.Context, sub *subject.S
 		}
 	}
 
-	if canExecute, err := h.c.CanExecute(ctx, sub); err != nil {
+	if canExecute, err := h.c.CanExecuteOnSubject(ctx, sub); err != nil {
 		return err
 	} else if canExecute {
 		return h.h.Execute(ctx, sub)

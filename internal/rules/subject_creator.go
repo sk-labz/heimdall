@@ -21,9 +21,7 @@ import (
 	"github.com/dadrus/heimdall/internal/rules/mechanisms/subject"
 )
 
-//go:generate mockery --name subjectCreator --structname SubjectCreatorMock
-
 type subjectCreator interface {
-	Execute(ctx heimdall.Context) (*subject.Subject, error)
-	IsFallbackOnErrorAllowed() bool
+	Execute(ctx heimdall.RequestContext) (*subject.Subject, error)
+	IsInsecure() bool
 }

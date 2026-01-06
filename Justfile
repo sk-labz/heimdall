@@ -16,12 +16,12 @@ lint-dockerfile:
 
 lint-helmchart:
   helm lint ./charts/heimdall
-  helm template --set demo.enabled=true ./charts/heimdall > /tmp/decision-demo.yaml
-  helm template --set operationMode=proxy --set demo.enabled=true ./charts/heimdall > /tmp/proxy-demo.yaml
-  kubeconform --skip RuleSet -kubernetes-version 1.27.0 /tmp/decision-demo.yaml
-  kubeconform --skip RuleSet -kubernetes-version 1.27.0 /tmp/proxy-demo.yaml
-  rm /tmp/decision-demo.yaml
-  rm /tmp/proxy-demo.yaml
+  helm template ./charts/heimdall > /tmp/decision-config.yaml
+  helm template --set operationMode=proxy ./charts/heimdall > /tmp/proxy-config.yaml
+  kubeconform --skip RuleSet -kubernetes-version 1.31.0 /tmp/decision-config.yaml
+  kubeconform --skip RuleSet -kubernetes-version 1.31.0 /tmp/proxy-config.yaml
+  rm /tmp/decision-config.yaml
+  rm /tmp/proxy-config.yaml
 
 lint: check-licenses lint-api lint-code lint-dockerfile lint-helmchart
 
@@ -30,8 +30,13 @@ dependencies:
   go mod download
   go mod verify
 
+test-chart:
+  helm unittest ./charts/heimdall
+
 test: dependencies
   go test -v -coverprofile=coverage.cov -coverpkg=./... ./...
+
+test-all: lint test-chart test
 
 coverage: test
   go tool cover -html coverage.cov
@@ -44,11 +49,11 @@ build: dependencies
 build-image:
   #!/usr/bin/env bash
   git_ref=$(git rev-parse --short HEAD)
-  docker buildx build --build-arg VERSION=${git_ref} -t heimdall:local -f docker/Dockerfile .
+  docker build --build-arg VERSION=${git_ref} -t heimdall:local -f docker/Dockerfile .
 
 build-docs-debug-image:
   #!/usr/bin/env bash
-  docker buildx build -t heimdall-docs:local -f docker/docs.Dockerfile .
+  docker build -t heimdall-docs:local -f docker/docs.Dockerfile .
 
 run-docs: build-docs-debug-image
   #!/usr/bin/env bash

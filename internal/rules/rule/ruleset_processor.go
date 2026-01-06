@@ -16,12 +16,14 @@
 
 package rule
 
-import "github.com/dadrus/heimdall/internal/rules/config"
+import (
+	"context"
 
-//go:generate mockery --name SetProcessor --structname RuleSetProcessorMock
+	"github.com/dadrus/heimdall/internal/rules/config"
+)
 
 type SetProcessor interface {
-	OnCreated(ruleSet *config.RuleSet) error
-	OnUpdated(ruleSet *config.RuleSet) error
-	OnDeleted(ruleSet *config.RuleSet) error
+	OnCreated(ctx context.Context, ruleSet *config.RuleSet) error
+	OnUpdated(ctx context.Context, ruleSet *config.RuleSet) error
+	OnDeleted(ctx context.Context, ruleSet *config.RuleSet) error
 }

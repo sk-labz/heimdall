@@ -17,7 +17,6 @@
 package httpcache
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -46,22 +45,21 @@ func TestRoundTripperRoundTrip(t *testing.T) {
 		}
 
 		_, err := w.Write([]byte("foobar"))
-		require.NoError(t, err)
+		assert.NoError(t, err)
 	}))
 
 	defer srv.Close()
 
-	for _, tc := range []struct {
-		uc               string
+	for uc, tc := range map[string]struct {
 		setExpiresHeader bool
 		defaultTTL       time.Duration
 		requestCounts    int
 	}{
-		{uc: "should cache response with expires header set", setExpiresHeader: true, requestCounts: 1},
-		{uc: "should not cache response without default cache ttl", requestCounts: 4},
-		{uc: "should cache response with default cache ttl without other headers", defaultTTL: 10 * time.Second, requestCounts: 1},
+		"should cache response with expires header set":                      {setExpiresHeader: true, requestCounts: 1},
+		"should not cache response without default cache ttl":                {requestCounts: 4},
+		"should cache response with default cache ttl without other headers": {defaultTTL: 10 * time.Second, requestCounts: 1},
 	} {
-		t.Run(tc.uc, func(t *testing.T) {
+		t.Run(uc, func(t *testing.T) {
 			// GIVEN
 			requestCounts = 0
 			setExpiresHeader = tc.setExpiresHeader
@@ -76,7 +74,7 @@ func TestRoundTripperRoundTrip(t *testing.T) {
 			cch, err := memory.NewCache(nil, nil)
 			require.NoError(t, err)
 
-			ctx := cache.WithContext(context.Background(), cch)
+			ctx := cache.WithContext(t.Context(), cch)
 			req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
 			require.NoError(t, err)
 

@@ -18,7 +18,6 @@ package admissioncontroller
 
 import (
 	"bytes"
-	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -45,7 +44,7 @@ import (
 
 	"github.com/dadrus/heimdall/internal/config"
 	config2 "github.com/dadrus/heimdall/internal/rules/config"
-	"github.com/dadrus/heimdall/internal/rules/provider/kubernetes/api/v1alpha3"
+	"github.com/dadrus/heimdall/internal/rules/provider/kubernetes/api/v1beta1"
 	"github.com/dadrus/heimdall/internal/rules/rule/mocks"
 	"github.com/dadrus/heimdall/internal/x"
 	"github.com/dadrus/heimdall/internal/x/pkix/pemx"
@@ -114,26 +113,24 @@ func TestControllerLifecycle(t *testing.T) {
 			Namespace:       "test",
 			Name:            "test-rules",
 			Operation:       admissionv1.Create,
-			Kind:            metav1.GroupVersionKind{Group: v1alpha3.GroupName, Version: v1alpha3.GroupVersion, Kind: "RuleSet"},
-			Resource:        metav1.GroupVersionResource{Group: v1alpha3.GroupName, Version: v1alpha3.GroupVersion, Resource: "rulesets"},
-			RequestKind:     &metav1.GroupVersionKind{Group: v1alpha3.GroupName, Version: v1alpha3.GroupVersion, Kind: "RuleSet"},
-			RequestResource: &metav1.GroupVersionResource{Group: v1alpha3.GroupName, Version: v1alpha3.GroupVersion, Resource: "rulesets"},
+			Kind:            metav1.GroupVersionKind{Group: v1beta1.GroupName, Version: v1beta1.GroupVersion, Kind: "RuleSet"},
+			Resource:        metav1.GroupVersionResource{Group: v1beta1.GroupName, Version: v1beta1.GroupVersion, Resource: "rulesets"},
+			RequestKind:     &metav1.GroupVersionKind{Group: v1beta1.GroupName, Version: v1beta1.GroupVersion, Kind: "RuleSet"},
+			RequestResource: &metav1.GroupVersionResource{Group: v1beta1.GroupName, Version: v1beta1.GroupVersion, Resource: "rulesets"},
 		},
 	}
 
-	for _, tc := range []struct {
-		uc               string
+	for uc, tc := range map[string]struct {
 		tls              *config.TLS
 		request          func(t *testing.T, URL string) *http.Request
 		setupRuleFactory func(t *testing.T, factory *mocks.FactoryMock)
 		assert           func(t *testing.T, err error, resp *http.Response)
 	}{
-		{
-			uc: "admission controller not started",
+		"admission controller not started": {
 			request: func(t *testing.T, URL string) *http.Request {
 				t.Helper()
 
-				req, err := http.NewRequestWithContext(context.TODO(), http.MethodPost, URL, nil)
+				req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, URL, nil)
 				require.NoError(t, err)
 
 				return req
@@ -142,11 +139,10 @@ func TestControllerLifecycle(t *testing.T) {
 				t.Helper()
 
 				require.Error(t, err)
-				assert.Contains(t, err.Error(), "connection refused")
+				require.ErrorContains(t, err, "connection refused")
 			},
 		},
-		{
-			uc:  "unsupported review request kind",
+		"unsupported review request kind": {
 			tls: &config.TLS{KeyStore: config.KeyStore{Path: pemFile.Name()}},
 			request: func(t *testing.T, URL string) *http.Request {
 				t.Helper()
@@ -156,7 +152,7 @@ func TestControllerLifecycle(t *testing.T) {
 				data, err := json.Marshal(&reviewReq)
 				require.NoError(t, err)
 
-				req, err := http.NewRequestWithContext(context.TODO(), http.MethodPost, URL, bytes.NewReader(data))
+				req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, URL, bytes.NewReader(data))
 				require.NoError(t, err)
 				req.Header.Set("Content-Type", "application/json")
 
@@ -189,15 +185,14 @@ func TestControllerLifecycle(t *testing.T) {
 				assert.Contains(t, status.Details.Causes[0].Message, "only rule sets")
 			},
 		},
-		{
-			uc:  "RuleSet filtered",
+		"RuleSet filtered": {
 			tls: &config.TLS{KeyStore: config.KeyStore{Path: pemFile.Name()}},
 			request: func(t *testing.T, URL string) *http.Request {
 				t.Helper()
 
-				ruleSet := v1alpha3.RuleSet{
+				ruleSet := v1beta1.RuleSet{
 					TypeMeta: metav1.TypeMeta{
-						APIVersion: fmt.Sprintf("%s/%s", v1alpha3.GroupName, v1alpha3.GroupVersion),
+						APIVersion: fmt.Sprintf("%s/%s", v1beta1.GroupName, v1beta1.GroupVersion),
 						Kind:       "RuleSet",
 					},
 					ObjectMeta: metav1.ObjectMeta{
@@ -208,7 +203,7 @@ func TestControllerLifecycle(t *testing.T) {
 						Generation:        1,
 						CreationTimestamp: metav1.NewTime(time.Now()),
 					},
-					Spec: v1alpha3.RuleSetSpec{AuthClassName: "foo"},
+					Spec: v1beta1.RuleSetSpec{AuthClassName: "foo"},
 				}
 				data, err := json.Marshal(&ruleSet)
 				require.NoError(t, err)
@@ -218,7 +213,7 @@ func TestControllerLifecycle(t *testing.T) {
 				data, err = json.Marshal(&reviewReq)
 				require.NoError(t, err)
 
-				req, err := http.NewRequestWithContext(context.TODO(), http.MethodPost, URL, bytes.NewReader(data))
+				req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, URL, bytes.NewReader(data))
 				require.NoError(t, err)
 				req.Header.Set("Content-Type", "application/json")
 
@@ -247,15 +242,14 @@ func TestControllerLifecycle(t *testing.T) {
 				assert.Contains(t, status.Message, "RuleSet ignored")
 			},
 		},
-		{
-			uc:  "RuleSet validation fails",
+		"RuleSet validation fails": {
 			tls: &config.TLS{KeyStore: config.KeyStore{Path: pemFile.Name()}},
 			request: func(t *testing.T, URL string) *http.Request {
 				t.Helper()
 
-				ruleSet := v1alpha3.RuleSet{
+				ruleSet := v1beta1.RuleSet{
 					TypeMeta: metav1.TypeMeta{
-						APIVersion: fmt.Sprintf("%s/%s", v1alpha3.GroupName, v1alpha3.GroupVersion),
+						APIVersion: fmt.Sprintf("%s/%s", v1beta1.GroupName, v1beta1.GroupVersion),
 						Kind:       "RuleSet",
 					},
 					ObjectMeta: metav1.ObjectMeta{
@@ -266,14 +260,15 @@ func TestControllerLifecycle(t *testing.T) {
 						Generation:        1,
 						CreationTimestamp: metav1.NewTime(time.Now()),
 					},
-					Spec: v1alpha3.RuleSetSpec{
+					Spec: v1beta1.RuleSetSpec{
 						AuthClassName: authClass,
 						Rules: []config2.Rule{
 							{
 								ID: "test",
-								RuleMatcher: config2.Matcher{
-									URL:      "http://foo.bar",
-									Strategy: "glob",
+								Matcher: config2.Matcher{
+									Routes:  []config2.Route{{Path: "/foo.bar"}},
+									Scheme:  "http",
+									Methods: []string{http.MethodGet},
 								},
 								Backend: &config2.Backend{
 									Host: "baz",
@@ -284,7 +279,6 @@ func TestControllerLifecycle(t *testing.T) {
 										QueryParamsToRemove: []string{"baz"},
 									},
 								},
-								Methods: []string{http.MethodGet},
 								Execute: []config.MechanismConfig{
 									{"authenticator": "authn"},
 									{"authorizer": "authz"},
@@ -301,7 +295,7 @@ func TestControllerLifecycle(t *testing.T) {
 				data, err = json.Marshal(&reviewReq)
 				require.NoError(t, err)
 
-				req, err := http.NewRequestWithContext(context.TODO(), http.MethodPost, URL, bytes.NewReader(data))
+				req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, URL, bytes.NewReader(data))
 				require.NoError(t, err)
 				req.Header.Set("Content-Type", "application/json")
 
@@ -310,7 +304,7 @@ func TestControllerLifecycle(t *testing.T) {
 			setupRuleFactory: func(t *testing.T, factory *mocks.FactoryMock) {
 				t.Helper()
 
-				factory.EXPECT().CreateRule("1alpha3", mock.Anything, mock.Anything).
+				factory.EXPECT().CreateRule("1beta1", mock.Anything, mock.Anything).
 					Once().Return(nil, errors.New("Test error"))
 			},
 			assert: func(t *testing.T, err error, resp *http.Response) {
@@ -340,15 +334,14 @@ func TestControllerLifecycle(t *testing.T) {
 				assert.Contains(t, status.Details.Causes[0].Message, "Test error")
 			},
 		},
-		{
-			uc:  "successful RuleSet validation",
+		"successful RuleSet validation": {
 			tls: &config.TLS{KeyStore: config.KeyStore{Path: pemFile.Name()}},
 			request: func(t *testing.T, URL string) *http.Request {
 				t.Helper()
 
-				ruleSet := v1alpha3.RuleSet{
+				ruleSet := v1beta1.RuleSet{
 					TypeMeta: metav1.TypeMeta{
-						APIVersion: fmt.Sprintf("%s/%s", v1alpha3.GroupName, v1alpha3.GroupVersion),
+						APIVersion: fmt.Sprintf("%s/%s", v1beta1.GroupName, v1beta1.GroupVersion),
 						Kind:       "RuleSet",
 					},
 					ObjectMeta: metav1.ObjectMeta{
@@ -359,14 +352,15 @@ func TestControllerLifecycle(t *testing.T) {
 						Generation:        1,
 						CreationTimestamp: metav1.NewTime(time.Now()),
 					},
-					Spec: v1alpha3.RuleSetSpec{
+					Spec: v1beta1.RuleSetSpec{
 						AuthClassName: authClass,
 						Rules: []config2.Rule{
 							{
 								ID: "test",
-								RuleMatcher: config2.Matcher{
-									URL:      "http://foo.bar",
-									Strategy: "glob",
+								Matcher: config2.Matcher{
+									Routes:  []config2.Route{{Path: "/foo.bar"}},
+									Scheme:  "http",
+									Methods: []string{http.MethodGet},
 								},
 								Backend: &config2.Backend{
 									Host: "baz",
@@ -377,7 +371,6 @@ func TestControllerLifecycle(t *testing.T) {
 										QueryParamsToRemove: []string{"baz"},
 									},
 								},
-								Methods: []string{http.MethodGet},
 								Execute: []config.MechanismConfig{
 									{"authenticator": "authn"},
 									{"authorizer": "authz"},
@@ -394,7 +387,7 @@ func TestControllerLifecycle(t *testing.T) {
 				data, err = json.Marshal(&reviewReq)
 				require.NoError(t, err)
 
-				req, err := http.NewRequestWithContext(context.TODO(), http.MethodPost, URL, bytes.NewReader(data))
+				req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, URL, bytes.NewReader(data))
 				require.NoError(t, err)
 				req.Header.Set("Content-Type", "application/json")
 
@@ -403,7 +396,7 @@ func TestControllerLifecycle(t *testing.T) {
 			setupRuleFactory: func(t *testing.T, factory *mocks.FactoryMock) {
 				t.Helper()
 
-				factory.EXPECT().CreateRule("1alpha3", mock.Anything, mock.Anything).
+				factory.EXPECT().CreateRule("1beta1", mock.Anything, mock.Anything).
 					Once().Return(nil, nil)
 			},
 			assert: func(t *testing.T, err error, resp *http.Response) {
@@ -430,7 +423,7 @@ func TestControllerLifecycle(t *testing.T) {
 			},
 		},
 	} {
-		t.Run(tc.uc, func(t *testing.T) {
+		t.Run(uc, func(t *testing.T) {
 			// GIVEN
 			reviewReq.Request.Kind.Kind = "RuleSet"
 			reviewReq.Request.Object.Raw = nil
@@ -456,12 +449,12 @@ func TestControllerLifecycle(t *testing.T) {
 			)
 			client := x.IfThenElse(tc.tls != nil, tlsClient, notTLSClient)
 
-			err = controller.Start(context.TODO())
+			err = controller.Start(t.Context())
 			require.NoError(t, err)
 
 			time.Sleep(20 * time.Millisecond)
 
-			defer controller.Stop(context.TODO())
+			defer controller.Stop(t.Context())
 
 			// WHEN
 			resp, err := client.Do(tc.request(t, serviceAddress))
@@ -472,7 +465,6 @@ func TestControllerLifecycle(t *testing.T) {
 			}
 
 			tc.assert(t, err, resp)
-			rf.AssertExpectations(t)
 		})
 	}
 }

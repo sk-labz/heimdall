@@ -26,10 +26,11 @@ import (
 
 	"github.com/dadrus/heimdall/internal/config"
 	"github.com/dadrus/heimdall/internal/handler/listener"
+	"github.com/dadrus/heimdall/internal/heimdall"
+	"github.com/dadrus/heimdall/internal/otel/metrics/certificate"
 	"github.com/dadrus/heimdall/internal/watcher"
+	"github.com/dadrus/heimdall/internal/x/errorchain"
 )
-
-//go:generate mockery --name Server --structname ServerMock
 
 type Server interface {
 	Serve(l net.Listener) error
@@ -37,20 +38,28 @@ type Server interface {
 }
 
 type LifecycleManager struct {
-	ServiceName    string
-	ServiceAddress string
-	Server         Server
-	Logger         zerolog.Logger
-	TLSConf        *config.TLS
-	FileWatcher    watcher.Watcher
+	ServiceName         string
+	ServiceAddress      string
+	Server              Server
+	Logger              zerolog.Logger
+	TLSConf             *config.TLS
+	FileWatcher         watcher.Watcher
+	CertificateObserver certificate.Observer
 }
 
-func (m *LifecycleManager) Start(_ context.Context) error {
-	ln, err := listener.New("tcp", m.ServiceAddress, m.TLSConf, m.FileWatcher)
+func (m *LifecycleManager) Start(ctx context.Context) error {
+	ln, err := listener.New(
+		ctx,
+		m.ServiceName,
+		m.ServiceAddress,
+		m.TLSConf,
+		m.FileWatcher,
+		m.CertificateObserver,
+	)
 	if err != nil {
-		m.Logger.Fatal().Err(err).Str("_service", m.ServiceName).Msg("Could not create listener")
-
-		return err
+		return errorchain.NewWithMessagef(heimdall.ErrInternal,
+			"Could not create listener for %s service", m.ServiceName).
+			CausedBy(err)
 	}
 
 	go func() {
@@ -58,6 +67,12 @@ func (m *LifecycleManager) Start(_ context.Context) error {
 			Str("_address", ln.Addr().String()).
 			Str("_service", m.ServiceName).
 			Msg("Starting listening")
+
+		if m.TLSConf == nil {
+			m.Logger.Warn().
+				Str("_service", m.ServiceName).
+				Msg("TLS is disabled.")
+		}
 
 		if err = m.Server.Serve(ln); err != nil {
 			if !errors.Is(err, http.ErrServerClosed) {

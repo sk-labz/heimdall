@@ -68,10 +68,6 @@ The identifier of the subject to be verified.
 +
 The password of the subject to be verified.
 
-* *`allow_fallback_on_error`*: _boolean_ (optional, overridable)
-+
-If set to `true`, allows the pipeline to fall back to the next authenticator in the pipeline if this one fails to verify the credentials. Defaults to `false`.
-
 .Configuration of Basic Auth authenticator
 ====
 [source, yaml]
@@ -121,10 +117,6 @@ Where to extract the link:{{< relref "/docs/mechanisms/evaluation_objects.adoc#_
 * *`cache_ttl`*: _link:{{< relref "/docs/configuration/types.adoc#_duration" >}}[Duration]_ (optional, overridable)
 +
 How long to cache the response. If not set, response caching if disabled. The cache key is calculated from the `identity_info_endpoint` configuration and the actual authentication data value.
-
-* *`allow_fallback_on_error`*: _boolean_ (optional, overridable)
-+
-If set to `true`, allows the pipeline to fall back to the next authenticator in the pipeline if this one fails to verify the credentials. Defaults to `false`.
 
 * *`session_lifespan`*: _link:{{< relref "/docs/configuration/types.adoc#_session_lifespan" >}}[Session Lifespan]_ (optional, not overridable)
 +
@@ -204,7 +196,7 @@ config:
 
 Usually, you would not only like to verify the validity of a token, but also a couple of claims. This can be achieved by a link:{{< relref "authorizers.adoc#_local_cel" >}}[CEL Authorizer]. However, there is also a special purpose link:{{< relref "#_oauth2_introspection">}}[OAuth2 Introspection] authenticator type, which supports asserting all security relevant claims in just one place and does not need so much configuration as shown above.
 
-In this configuration the authenticator extracts the token from the `Authorization` header and request the information about the corresponding user from the `\http://my-auth.system/introspect` endpoint by sending the extracted token in the body of the request in a parameter named `token`.
+In this configuration the authenticator extracts the token from the `Authorization` header and request the information about the corresponding user from the `\https://my-auth.system/introspect` endpoint by sending the extracted token in the body of the request in a parameter named `token`.
 ====
 
 .Configuration to work with Google's Firebase.
@@ -255,7 +247,7 @@ The https://datatracker.ietf.org/doc/html/rfc8414[OAuth 2.0 Authorization Server
 +
 The configuration of this property is mutually exclusive with `introspection_endpoint`. If used, at least the `url` must be configured, can be templated and has access to the `TokenIssuer` object already introduced above (with the same limitations).
 +
-The `metadata_endpoint` is by default configured to use `GET` as HTTP method and sets the `Accept` header to `application/json` as also required by both specifications referenced above. In addition, to avoid useless communication, it is also configured to make use of HTTP cache according to http://tools.ietf.org/html/rfc7234[RFC 7234] with default HTTP cache ttl set to `30m`. All these settings can however be overridden if required.
+The `metadata_endpoint` is by default configured to use `GET` as HTTP method and sets the `Accept` header to `application/json` as also required by both specifications referenced above. In addition, to avoid useless communication, it is also configured to make use of HTTP cache according to https://tools.ietf.org/html/rfc7234[RFC 7234] with default HTTP cache ttl set to `30m`. All these settings can however be overridden if required.
 +
 In addition to the properties specified by the link:{{< relref "/docs/configuration/types.adoc#_endpoint">}}[`endpoint`] type, following properties are available:
 
@@ -263,13 +255,29 @@ In addition to the properties specified by the link:{{< relref "/docs/configurat
 +
 Upon retrieval of the server metadata, both, the https://datatracker.ietf.org/doc/html/rfc8414[OAuth 2.0 Authorization Server Metadata] RFC, and the https://openid.net/specs/openid-connect-discovery-1_0.html[OpenID Connect Discovery] specification, require the verification of the issuer identifier for security reasons, e.g. to prevent https://datatracker.ietf.org/doc/html/rfc8414#section-6.2[Spoofing Attacks]. There are however setups, where strictly following that recommendation would result in extended bandwidth usage (instead of communicating directly with the auth server within the cluster one would need to use the same domain, the client application uses, which introduces additional network hops). It might also not work at all as the actual identifier of the issuer would change depending on where the request come from. By making use of this property and setting it to `true`, one can disable the corresponding verification. Defaults to `false`.
 
+** *`resolved_endpoints`*: _map of ResolvedEndpoint_ (optional, not overridable)
++
+A map where each key represents the name of an endpoint as specified in the https://datatracker.ietf.org/doc/html/rfc8414[OAuth 2.0 Authorization Server Metadata] or the https://openid.net/specs/openid-connect-discovery-1_0.html[OpenID Connect Discovery] specifications. The value associated with each key is a set of configuration options that are applied before sending a request to that specific endpoint. Following configuration options are possible:
+
+*** *`retry`* _link:{{< relref "/docs/configuration/types.adoc#_retry" >}}[Retry]_ (optional)
++
+What to do if the communication fails. If not configured, no retry attempts are done.
+
+*** *`auth`* _link:{{< relref "/docs/configuration/types.adoc#_authentication_strategy" >}}[Authentication Strategy]_ (optional)
++
+Authentication strategy to apply if the endpoint requires authentication.
+
+*** *`http_cache`* _link:{{< relref "/docs/configuration/types.adoc#_http_cache" >}}[HTTP Cache]_ (optional)
++
+Controls whether HTTP caching according to https://www.rfc-editor.org/rfc/rfc7234[RFC 7234] should be used.
+
 * *`token_source`*: _link:{{< relref "/docs/configuration/types.adoc#_authentication_data_source" >}}[Authentication Data Source]_ (optional, not overridable)
 +
 Where to get the access token from. Defaults to retrieve it from the `Authorization` header, the `access_token` query parameter or the `access_token` body parameter (latter, if the body is of `application/x-www-form-urlencoded` MIME type).
 
-* *`assertions`*: _link:{{< relref "/docs/configuration/types.adoc#_assertions" >}}[Assertions]_ (dependent, overridable)
+* *`assertions`*: _link:{{< relref "/docs/configuration/types.adoc#_assertions" >}}[Assertions]_ (optional, overridable)
 +
-Configures the required claim assertions. Overriding on rule level is possible even partially. Those parts of the assertion, which have not been overridden are taken from the prototype configuration. If `metadata_endpoint` is used, the list of issuers is optional, as the issuer will be resolved via the auth server metadata document. Otherwise, the list of issuers is mandatory.
+Configures the required claim assertions. Overriding on rule level is possible even partially. Those parts of the assertion, which have not been overridden are taken from the prototype configuration.
 
 * *`subject`*: _link:{{< relref "/docs/configuration/types.adoc#_subject" >}}[Subject]_ (optional, not overridable)
 +
@@ -279,10 +287,6 @@ Where to extract the link:{{< relref "/docs/mechanisms/evaluation_objects.adoc#_
 +
 How long to cache the response. If not set, caching of the introspection response is based on the available token expiration information. To disable caching, set it to `0s`. If you set the ttl to a custom value > 0, the expiration time (if available) of the token will be considered. The cache key is calculated from the `introspection_endpoint` configuration and the value of the access token.
 
-* *`allow_fallback_on_error`*: _boolean_ (optional, overridable)
-+
-If set to `true`, allows the pipeline to fall back to the next authenticator in the pipeline if this one fails to verify the credentials. Defaults to `false`.
-
 .Minimal possible configuration based on the Introspection endpoint
 ====
 [source, yaml]
@@ -291,14 +295,11 @@ id: at_opaque
 type: oauth2_introspection
 config:
   introspection_endpoint:
-    url: http://hydra:4445/oauth2/introspect
-  assertions:
-    issuers:
-      - http://127.0.0.1:4444/
+    url: https://hydra:4445/oauth2/introspect
 ----
 ====
 
-.Configuration for Keycloak utilizing metadata discovery
+.Configuration for Keycloak utilizing metadata discovery and authentication configuration for the resolved `introspection_endpoint`.
 ====
 [source, yaml]
 ----
@@ -306,14 +307,21 @@ id: keycloak
 type: metadata_endpoint
 config:
   metadata_endpoint:
-    url: http://keycloak:8080/realms/{{ trimPrefix "https://my-auth-server/realms/" .TokenIssuer }}/.well-known/openid-configuration
-  # Note that no assertions are configured here, since it'll be resolved via the metadata endpoint
+    url: https://keycloak:8080/realms/{{ trimPrefix "https://my-auth-server/realms/" .TokenIssuer }}/.well-known/openid-configuration
+    resolved_endpoints:
+      introspection_endpoint:
+        auth:
+          type: api_key
+          config:
+            in: header
+            name: Authorization
+            value: Bearer 23410913-abewfq.123483
 ----
 
 This example does also show how to make use of templating if the format of the access token is JWT.
 
 The external domain of the auth server in this example is `\https://my-auth-server.com`.
-If the `iss` claim of the issued JWT is set to `\https://my-auth-server.com/realms/my-app`, the above line will build an internal URL to the metadata endpoint of the same server and profile/realm, which is that case would be `\http://keycloak:8080/realms/my-app/.well-known/openid-configuration`
+If the `iss` claim of the issued JWT is set to `\https://my-auth-server.com/realms/my-app`, the above line will build an internal URL to the metadata endpoint of the same server and profile/realm, which is that case would be `\https://keycloak:8080/realms/my-app/.well-known/openid-configuration`
 
 ====
 
@@ -337,13 +345,29 @@ The https://datatracker.ietf.org/doc/html/rfc8414[OAuth 2.0 Authorization Server
 +
 The configuration of this property is mutually exclusive with `jwks_endpoint`. If used, at least the `url` must be configured. As with the `jwks_endpoint`, the path part of the `url` can be templated and has access to the `TokenIssuer` object already introduced above.
 +
-As with the `jwks_endpoint` as well, the `metadata_endpoint` is by default configured to use `GET` as HTTP method and sets the `Accept` header to `application/json`, as also required by both specifications referenced above. In addition, to avoid useless communication, it is also configured to make use of HTTP cache according to http://tools.ietf.org/html/rfc7234[RFC 7234] with default HTTP cache ttl set to `30m`. All these settings can however be overridden if required.
+As with the `jwks_endpoint` as well, the `metadata_endpoint` is by default configured to use `GET` as HTTP method and sets the `Accept` header to `application/json`, as also required by both specifications referenced above. In addition, to avoid useless communication, it is also configured to make use of HTTP cache according to https://tools.ietf.org/html/rfc7234[RFC 7234] with default HTTP cache ttl set to `30m`. All these settings can however be overridden if required.
 +
 In addition to the properties specified by the link:{{< relref "/docs/configuration/types.adoc#_endpoint">}}[`endpoint`] type, following properties are available:
 
 ** *`disable_issuer_identifier_verification`*: _boolean_ (optional, not overridable)
 +
 Upon retrieval of the server metadata, both, the https://datatracker.ietf.org/doc/html/rfc8414[OAuth 2.0 Authorization Server Metadata] RFC, and the https://openid.net/specs/openid-connect-discovery-1_0.html[OpenID Connect Discovery] specification, require the verification of the issuer identifier for security reasons, e.g. to prevent https://datatracker.ietf.org/doc/html/rfc8414#section-6.2[Spoofing Attacks]. There are however setups, where strictly following that recommendation would result in extended bandwidth usage (instead of communicating directly with the auth server within the cluster one would need to use the same domain, the client application uses, which introduces additional network hops). It might also not work at all as the actual identifier of the issuer would change depending on where the request come from. By making use of this property and setting it to `true`, one can disable the corresponding verification. Defaults to `false`.
+
+** *`resolved_endpoints`*: _map of ResolvedEndpoint_ (optional, not overridable)
++
+A map where each key represents the name of an endpoint as specified in the https://datatracker.ietf.org/doc/html/rfc8414[OAuth 2.0 Authorization Server Metadata] or the https://openid.net/specs/openid-connect-discovery-1_0.html[OpenID Connect Discovery] specifications. The value associated with each key is a set of configuration options that are applied before sending a request to that specific endpoint. Following configuration options are possible:
+
+*** *`retry`* _link:{{< relref "/docs/configuration/types.adoc#_retry" >}}[Retry]_ (optional)
++
+What to do if the communication fails. If not configured, no retry attempts are done.
+
+*** *`auth`* _link:{{< relref "/docs/configuration/types.adoc#_authentication_strategy" >}}[Authentication Strategy]_ (optional)
++
+Authentication strategy to apply if the endpoint requires authentication.
+
+*** *`http_cache`* _link:{{< relref "/docs/configuration/types.adoc#_http_cache" >}}[HTTP Cache]_ (optional)
++
+Controls whether HTTP caching according to https://www.rfc-editor.org/rfc/rfc7234[RFC 7234] should be used.
 
 * *`jwt_source`*: _link:{{< relref "/docs/configuration/types.adoc#_authentication_data_source" >}}[Authentication Data Source]_ (optional, not overridable)
 +
@@ -360,10 +384,6 @@ Where to extract the subject id from the JWT, as well as which attributes to use
 * *`cache_ttl`*: _link:{{< relref "/docs/configuration/types.adoc#_duration" >}}[Duration]_ (optional, overridable)
 +
 How long to cache the key from the JWKS response, which was used for signature verification purposes. If not set, heimdall will cache this key for 10 minutes and not call JWKS endpoint again if the same `kid` is referenced in an JWT and same JWKS endpoint is used. The cache key is calculated from the `jwks_endpoint` configuration and the `kid` referenced in the JWT.
-
-* *`allow_fallback_on_error`*: _boolean_ (optional, overridable)
-+
-If set to `true`, allows the pipeline to fall back to the next authenticator in the pipeline if this one fails to verify the credentials. Defaults to `false`.
 
 * *`validate_jwk`*: _boolean_ (optional, not overridable)
 +
@@ -383,14 +403,14 @@ id: at_jwt
 type: jwt
 config:
   jwks_endpoint:
-    url: http://hydra:4444/.well-known/jwks.json
+    url: https://hydra:4444/.well-known/jwks.json
   assertions:
     issuers:
-      - http://127.0.0.1:4444/
+      - https://127.0.0.1:4444/
 ----
 ====
 
-.Configuration for Keycloak utilizing metadata discovery
+.Configuration for Keycloak utilizing metadata discovery and HTTP cache enabled for the resolved `jwks_uri`.
 ====
 [source, yaml]
 ----
@@ -398,7 +418,11 @@ id: keycloak
 type: jwt
 config:
   metadata_endpoint:
-    url: http://keycloak:8080/realms/my-app/.well-known/openid-configuration
+    url: https://keycloak:8080/realms/my-app/.well-known/openid-configuration
+    resolved_endpoints:
+      jwks_uri:
+        http_cache:
+          enabled: true
   # Note that no assertions are configured here, since it'll be resolved via the metadata endpoint
 ----
 ====

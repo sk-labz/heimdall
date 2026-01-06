@@ -11,6 +11,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 package mocks
 
@@ -24,7 +26,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/bridge/opentracing/migration"
 	"go.opentelemetry.io/otel/codes"
-	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/embedded"
 	"go.opentelemetry.io/otel/trace/noop"
@@ -49,6 +51,10 @@ type MockTracerProvider struct {
 	embedded.TracerProvider
 
 	tracer *MockTracer
+}
+
+func NewMockTraceProvider() *MockTracerProvider {
+	return &MockTracerProvider{tracer: NewMockTracer()}
 }
 
 func (m *MockTracerProvider) Tracer(_ string, _ ...trace.TracerOption) trace.Tracer {
@@ -82,10 +88,6 @@ func NewMockTracer() *MockTracer {
 
 		rand: rand.New(rand.NewSource(time.Now().Unix())), //nolint:gosec
 	}
-}
-
-func NewMockTraceProvider() *MockTracerProvider {
-	return &MockTracerProvider{tracer: NewMockTracer()}
 }
 
 func (t *MockTracer) Start(ctx context.Context, _ string, opts ...trace.SpanStartOption) (
@@ -122,6 +124,14 @@ func (t *MockTracer) Start(ctx context.Context, _ string, opts ...trace.SpanStar
 	}
 
 	return ctx, span
+}
+
+func (t *MockTracer) DeferredContextSetupHook(ctx context.Context, _ trace.Span) context.Context {
+	return t.addSpareContextValue(ctx)
+}
+
+func (t *MockTracer) Reset() {
+	t.FinishedSpans = []*MockSpan{}
 }
 
 func (t *MockTracer) addSpareContextValue(ctx context.Context) context.Context {
@@ -210,14 +220,6 @@ func (t *MockTracer) getRandTraceID() trace.TraceID {
 	return tid
 }
 
-func (t *MockTracer) DeferredContextSetupHook(ctx context.Context, _ trace.Span) context.Context {
-	return t.addSpareContextValue(ctx)
-}
-
-func (t *MockTracer) Reset() {
-	t.FinishedSpans = []*MockSpan{}
-}
-
 type MockEvent struct {
 	Timestamp  time.Time
 	Name       string
@@ -273,30 +275,6 @@ func (s *MockSpan) SetError(v bool) {
 
 func (s *MockSpan) SetAttributes(attributes ...attribute.KeyValue) {
 	s.applyUpdate(attributes)
-}
-
-func (s *MockSpan) applyUpdate(update []attribute.KeyValue) {
-	updateM := make(map[attribute.Key]attribute.Value, len(update))
-	for _, kv := range update {
-		updateM[kv.Key] = kv.Value
-	}
-
-	seen := make(map[attribute.Key]struct{})
-
-	for i, kv := range s.Attributes {
-		if v, ok := updateM[kv.Key]; ok {
-			s.Attributes[i].Value = v
-			seen[kv.Key] = struct{}{}
-		}
-	}
-
-	for k, v := range updateM {
-		if _, ok := seen[k]; ok {
-			continue
-		}
-
-		s.Attributes = append(s.Attributes, attribute.KeyValue{Key: k, Value: v})
-	}
 }
 
 func (s *MockSpan) End(options ...trace.SpanEndOption) {
@@ -358,3 +336,27 @@ func (s *MockSpan) OverrideTracer(tracer trace.Tracer) {
 }
 
 func (s *MockSpan) TracerProvider() trace.TracerProvider { return noop.NewTracerProvider() }
+
+func (s *MockSpan) applyUpdate(update []attribute.KeyValue) {
+	updateM := make(map[attribute.Key]attribute.Value, len(update))
+	for _, kv := range update {
+		updateM[kv.Key] = kv.Value
+	}
+
+	seen := make(map[attribute.Key]struct{})
+
+	for i, kv := range s.Attributes {
+		if v, ok := updateM[kv.Key]; ok {
+			s.Attributes[i].Value = v
+			seen[kv.Key] = struct{}{}
+		}
+	}
+
+	for k, v := range updateM {
+		if _, ok := seen[k]; ok {
+			continue
+		}
+
+		s.Attributes = append(s.Attributes, attribute.KeyValue{Key: k, Value: v})
+	}
+}

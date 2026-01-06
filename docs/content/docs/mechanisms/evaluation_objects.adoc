@@ -20,15 +20,15 @@ Objects represent state in the execution of a particular rule. These are the ent
 
 === Subject
 
-This object contains the information about the authenticated subject and has the following attributes:
+This object is created by an authenticator which was able to verify the authentication claim available in the request, and contains the information about the authenticated subject. It has the following properties:
 
 * *`ID`*: _string_
 +
-The identifier of the subject. This value is set by the authenticator, which was able to authenticate the subject.
+The identifier of the subject.
 
 * *`Attributes`*: _map_
 +
-Contains all attributes, which are known about the subject. The content is initially set by the authenticator, which was able to authenticate the subject. Mechanisms in the following stages can update it, but cannot override any entries.
+Contains all attributes, which are known about the subject.
 
 Each object of this type can be thought as a JSON object. Here some examples:
 
@@ -54,7 +54,7 @@ Subject = {
     "exp": "1670600805",
     "jti": "7b91ed8a-0251-4e02-8d51-9792785851e8",
     "iat": "1670600305",
-    "iss": "http://testauthserver.local",
+    "iss": "https://testauthserver.local",
     "nbf": "1670600305",
     "extra": {
         "foo": ["bar", "baz"]
@@ -72,32 +72,50 @@ This object contains information about the request handled by heimdall and has t
 +
 The HTTP method used, like `GET`, `POST`, etc.
 
+[#_url_captures]
 * *`URL`*: _URL_
 +
 The URL of the matched request. This object has the following properties and methods:
 
-** *`Scheme`*: _string_
+** *`Captures`*: _map_
 +
-The HTTP scheme part of the url
+Allows accessing of the values captured by the named wildcards used in the matching path expression of the rule.
+
 ** *`Host`*: _string_
 +
-The host part of the url
+The host part of the url.
+
+** *`Hostname()`*: _method_
++
+This method returns the host name stripping any valid port number if present.
+
+** *`Port()`*: _method_
++
+Returns the port part of the `Host`, without the leading colon. If `Host` doesn't contain a valid numeric port, returns an empty string.
+
 ** *`Path`*: _string_
 +
-The path part of the url
-** *`RawQuery`*: _string_
-+
-The raw query part of the url.
-** *`String()`*: _method_
-+
-This method returns the URL as valid URL string of a form `scheme:host/path?query`.
+The path part of the url.
+
 ** *`Query()`*: _method_
 +
 The parsed query with each key-value pair being a string to array of strings mapping.
 
+** *`RawQuery`*: _string_
++
+The raw query part of the url.
+
+** *`Scheme`*: _string_
++
+The HTTP scheme part of the url.
+
+** *`String()`*: _method_
++
+This method returns the URL as valid URL string of a form `scheme:host/path?query`.
+
 * *`ClientIPAddresses`*: _string array_
 +
-The list of IP addresses the request passed through with the first entry being the ultimate client of the request. Only available if heimdall is configured to trust the client, sending this information, e.g. in the `X-Forwarded-From` header (see e.g. Decision Service link:{{< relref "/docs/services/decision.adoc#_trusted_proxies" >}}[trusted_proxies] configuration for more details).
+The list of IP addresses the request passed through with the first entry being the ultimate client of the request. Only available if heimdall is configured to trust the client, sending this information, e.g. in the `X-Forwarded-From` header (see also link:{{< relref "/docs/services/main.adoc#_trusted_proxies" >}}[trusted_proxies] configuration for more details).
 
 * *`Header(name)`*: _method_,
 +
@@ -152,13 +170,28 @@ Request = {
   Url: {
     Scheme: "https",
     Host: "localhost",
-    Path: "/test",
-    RawQuery: "baz=zab&baz=bar&foo=bar"
+    Path: "/test/abc",
+    RawQuery: "baz=zab&baz=bar&foo=bar",
+    Captures: { "value": "abc" }
   },
   ClientIP: ["127.0.0.1", "10.10.10.10"]
 }
 ----
 ====
+
+=== Outputs
+
+This object represents a pipeline execution specific key value map. It is used by pipeline steps to store or read results of particular step executions. Step id is used as a key and the value is the corresponding result.
+
+Example:
+
+[source, javascript]
+----
+Outputs = {
+    "id_1": ["a", "b"],
+    "id_2": { "foo": "bar", "baz": false }
+}
+----
 
 === Payload
 
@@ -193,6 +226,10 @@ This object represents an error, which has been raised during the execution of a
 +
 The ID of the mechanism, which raised the error.
 
+* *`StepID`*: _string_
++
+The ID of the pipeline step, which raised the error
+
 Proper error handling requires attention to the actual _link:{{< relref "/docs/configuration/types.adoc#_errorstate_type" >}}[error type]_ available via `type(Error)`.
 
 === Values
@@ -214,13 +251,13 @@ Values = {
 
 == Templating
 
-Some mechanisms support templating using https://golang.org/pkg/text/template/[Golang Text Templates]. Templates can act on all objects described above (link:{{< relref "#_subject" >}}[Subject], link:{{< relref "#_request" >}}[Request], link:{{< relref "#_payload" >}}[Payload] and link:{{< relref "#_values" >}}[Values]). Which exactly are supported is mechanism specific.
+Some mechanisms support templating using https://golang.org/pkg/text/template/[Golang Text Templates]. Templates can act on all objects described above (link:{{< relref "#_subject" >}}[Subject], link:{{< relref "#_outputs" >}}[Outputs], link:{{< relref "#_request" >}}[Request], link:{{< relref "#_payload" >}}[Payload] and link:{{< relref "#_values" >}}[Values]). Which exactly are supported is mechanism specific.
 
-To ease the usage, all http://masterminds.github.io/sprig/[sprig] functions, except `env` and `expandenv`, as well as the following functions are available:
+To ease the usage, all https://masterminds.github.io/sprig/[sprig] functions, except `env` and `expandenv`, as well as the following functions are available:
 
 * `urlenc` - Encodes a given string using url encoding. Is handy if you need to generate request body or query parameters e.g. for communication with further systems.
 
-* `atIndex` - Implements python-like access to arrays and takes as a single argument the index to access the element in the array at. With index being a positive values it works exactly the same way, as with the usage of the build-in index function to access array elements. With negative index value, one can access the array elements from the tail of the array. -1 is the index of the last element, -2 the index of the element before the last one, etc.
+* `atIndex` - Implements python-like access to arrays and takes as a single argument the index to access the element in the array at. With index being a positive values it works exactly the same way, as with the usage of the built-in index function to access array elements. With negative index value, one can access the array elements from the tail of the array. -1 is the index of the last element, -2 the index of the element before the last one, etc.
 +
 Example: `{{ atIndex 2 [1,2,3,4,5] }}` evaluates to `3` (behaves the same way as the `index` function) and `{{ atIndex -2 [1,2,3,4,5] }}` evaluates to `4`.
 
@@ -231,7 +268,7 @@ Example: `{{ splitList "/" "/foo/bar" }}` evaluates to the `["", "foo", "bar"]` 
 
 .Rendering a JSON object
 ====
-Imagine, we have a `POST` request for the URL `\http://foobar.baz/zab?foo=bar`, with a header `X-Foo` set to `bar` value, for which heimdall was able to identify a subject, with `ID=foo` and which `Attributes` contain an entry `email: foo@bar`, then you can generate a JSON object with this information with the following template:
+Imagine, we have a `POST` request for the URL `\https://foobar.baz/zab?foo=bar`, with a header `X-Foo` set to `bar` value, for which heimdall was able to identify a subject, with `ID=foo` and which `Attributes` contain an entry `email: foo@bar`, then you can generate a JSON object with this information with the following template:
 
 [source, gotemplate]
 ----
@@ -241,7 +278,8 @@ Imagine, we have a `POST` request for the URL `\http://foobar.baz/zab?foo=bar`, 
   "request_url": {{ quote .Request.URL }},
   "foo_value": {{ index .Request.URL.Query.foo 0 | quote }}
   "request_method": {{ quote .Request.Method }},
-  "x_foo_value": {{ .Request.Header "X-Foo" | quote }}
+  "x_foo_value": {{ .Request.Header "X-Foo" | quote }},
+  "whatever": {{ .Outputs.whatever | quote }}
 }
 ----
 
@@ -254,17 +292,18 @@ This will result in the following JSON object:
 {
     "subject_id": "foo",
     "email": "foo@bar.baz",
-    "request_url": "http://foobar.baz/zab?foo=bar",
+    "request_url": "https://foobar.baz/zab?foo=bar",
     "foo_value": "bar",
     "request_method": "POST",
-    "x_foo_value": "bar"
+    "x_foo_value": "bar",
+    "whatever": "some value"
 }
 ----
 ====
 
-.Access the last part of the path
+.Access to captured path segments
 ====
-Imagine, we have a `POST` request to the URL `\http://foobar.baz/zab/1234`, with `1234` being the identifier of a file, which should be updated with the contents sent in the body of the request, and you would like to control access to the aforesaid object using e.g. OpenFGA. This can be achieved with the following authorizer:
+Imagine, we have a `POST` request to the URL `\https://foobar.baz/zab/1234`, with `1234` being the identifier of a file, which should be updated with the contents sent in the body of the request, and you would like to control access to the aforesaid object using e.g. OpenFGA. This can be achieved with the following authorizer:
 
 [source, yaml]
 ----
@@ -277,7 +316,7 @@ config:
     {
       "user": "user:{{ .Subject.ID }}",
       "relation": "write",
-      "object": "file:{{ splitList "/" .Request.URL.Path | last }}"
+      "object": "file:{{ .Request.URL.Captures.id }}"
     }
   expressions:
   - expression: |
@@ -300,29 +339,33 @@ You can find further examples as part of mechanism descriptions, supporting temp
 
 == Expressions
 
-Expressions can be used to execute conditional logic. As of today only https://github.com/google/cel-spec[CEL] is supported as expression language. All standard, as well as https://pkg.go.dev/github.com/google/cel-go/ext#pkg-functions[extension] functions are available. Which of the link:{{<  relref "#_objects" >}}[evaluation objects] are available to the expression depends on the mechanism.
+Expressions can be used to execute conditional logic. Currently, only https://github.com/google/cel-spec[CEL] is supported as expression language. All standard CEL functions, as well as https://pkg.go.dev/github.com/google/cel-go/ext#pkg-functions[extension functions], are available. The set of available link:{{<  relref "#_objects" >}}[evaluation objects] depends on the specific mechanism in use.
 
-In addition to the build-in, respectively extension methods and functions, as well as the methods available on the evaluation objects, following functions are available as well:
+In addition to the built-in CEL functions, extension methods, and methods on evaluation objects, the following custom functions are also available:
 
-* `split` - this function works on strings and expects a separator as a single argument. The result is a string array.
-+
-Example: `"/foo/bar/baz".split("/")` returns `["", "foo", "bar", "baz"]`.
-
-* `regexFind` - this function returns the first (left most) match of a regular expression in the given string.
-+
-Example: `"abcd1234".regexFind("[a-zA-Z][1-9]")` returns `"d1"`.
-
-* `regexFindAll` - this function returns an array of all matches of a regular expression in the given string.
-+
-Example: `"123456789".regexFindAll("[2,4,6,8]")` returns `["2","4","6","8"]`.
-
-* `at` - this function implements python-like access to arrays and takes as a single argument the index to access the element in the array at. With index being a positive values it works exactly the same way, as with the usage of `[]` to access array elements. With negative index value, one can access the array elements from the tail of the array. -1 is the index of the last element, -2 the index of the element before the last one, etc.
+* `at` - Provides Python-like access to array elements. A positive index behaves like standard `[]` array access. A negative index accesses elements from the end of the array (`-1` is the last element, `-2` the second-last, etc.).
 +
 Example: `[1,2,3,4,5].at(2)` returns `3` and `[1,2,3,4,5].at(-2)` returns `4`.
 
-* `last` - this function works on arrays and returns the last element of an array or `nil` if the array is empty.
+* `last` - returns the last element of an array, or nil if the array is empty.
 +
 Example: `[1,2,3,4,5].last()` returns `5`
+
+* `regexFind` - returns the first (leftmost) match of a regular expression within a string.
++
+Example: `"abcd1234".regexFind("[a-zA-Z][1-9]")` returns `"d1"`.
+
+* `regexFindAll` - returns an array of all matches of a regular expression within a string.
++
+Example: `"123456789".regexFindAll("[2,4,6,8]")` returns `["2","4","6","8"]`.
+
+* `split` - splits a string by the given separator and returns an array of strings.
++
+Example: `"/foo/bar/baz".split("/")` returns `["", "foo", "bar", "baz"]`.
+
+* `networks` - accepts a single CIDR string or an array of CIDR strings, and returns a matcher object that can be used to check whether an IP address belongs to one of the specified ranges.
++
+Example: `Request.ClientIPAddresses.all(ip in networks(["172.16.0.0/12", "192.168.0.0/16"]))` checks whether all IPs in the `Request.ClientIPAddresses` array belong to the specified IP ranges.
 
 
 Some examples:

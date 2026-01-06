@@ -17,7 +17,7 @@
 package rules
 
 import (
-	"context"
+	"errors"
 	"net/url"
 	"testing"
 
@@ -29,366 +29,208 @@ import (
 	"github.com/dadrus/heimdall/internal/rules/config"
 	"github.com/dadrus/heimdall/internal/rules/mechanisms/subject"
 	"github.com/dadrus/heimdall/internal/rules/mocks"
-	"github.com/dadrus/heimdall/internal/rules/patternmatcher"
 	"github.com/dadrus/heimdall/internal/rules/rule"
 	"github.com/dadrus/heimdall/internal/x"
-	"github.com/dadrus/heimdall/internal/x/testsupport"
 )
-
-func TestRuleMatchMethod(t *testing.T) {
-	t.Parallel()
-
-	for _, tc := range []struct {
-		uc          string
-		methods     []string
-		toBeMatched string
-		assert      func(t *testing.T, matched bool)
-	}{
-		{
-			uc:          "matches",
-			methods:     []string{"FOO", "BAR"},
-			toBeMatched: "BAR",
-			assert: func(t *testing.T, matched bool) {
-				t.Helper()
-
-				assert.True(t, matched)
-			},
-		},
-		{
-			uc:          "doesn't match",
-			methods:     []string{"FOO", "BAR"},
-			toBeMatched: "BAZ",
-			assert: func(t *testing.T, matched bool) {
-				t.Helper()
-
-				assert.False(t, matched)
-			},
-		},
-	} {
-		t.Run("case="+tc.uc, func(t *testing.T) {
-			// GIVEN
-			rul := &ruleImpl{methods: tc.methods}
-
-			// WHEN
-			matched := rul.MatchesMethod(tc.toBeMatched)
-
-			// THEN
-			tc.assert(t, matched)
-		})
-	}
-}
-
-func TestRuleMatchURL(t *testing.T) {
-	t.Parallel()
-
-	for _, tc := range []struct {
-		uc            string
-		slashHandling config.EncodedSlashesHandling
-		matcher       func(t *testing.T) patternmatcher.PatternMatcher
-		toBeMatched   string
-		assert        func(t *testing.T, matched bool)
-	}{
-		{
-			uc: "matches",
-			matcher: func(t *testing.T) patternmatcher.PatternMatcher {
-				t.Helper()
-
-				matcher, err := patternmatcher.NewPatternMatcher("glob", "http://foo.bar/baz")
-				require.NoError(t, err)
-
-				return matcher
-			},
-			toBeMatched: "http://foo.bar/baz",
-			assert: func(t *testing.T, matched bool) {
-				t.Helper()
-
-				assert.True(t, matched)
-			},
-		},
-		{
-			uc: "matches with urlencoded path fragments",
-			matcher: func(t *testing.T) patternmatcher.PatternMatcher {
-				t.Helper()
-
-				matcher, err := patternmatcher.NewPatternMatcher("glob", "http://foo.bar/[id]/baz")
-				require.NoError(t, err)
-
-				return matcher
-			},
-			toBeMatched: "http://foo.bar/%5Bid%5D/baz",
-			assert: func(t *testing.T, matched bool) {
-				t.Helper()
-
-				assert.True(t, matched)
-			},
-		},
-		{
-			uc: "doesn't match with urlencoded slash in path",
-			matcher: func(t *testing.T) patternmatcher.PatternMatcher {
-				t.Helper()
-
-				matcher, err := patternmatcher.NewPatternMatcher("glob", "http://foo.bar/foo%2Fbaz")
-				require.NoError(t, err)
-
-				return matcher
-			},
-			toBeMatched: "http://foo.bar/foo%2Fbaz",
-			assert: func(t *testing.T, matched bool) {
-				t.Helper()
-
-				assert.False(t, matched)
-			},
-		},
-		{
-			uc:            "matches with urlencoded slash in path if allowed with decoding",
-			slashHandling: config.EncodedSlashesOn,
-			matcher: func(t *testing.T) patternmatcher.PatternMatcher {
-				t.Helper()
-
-				matcher, err := patternmatcher.NewPatternMatcher("glob", "http://foo.bar/foo/baz/[id]")
-				require.NoError(t, err)
-
-				return matcher
-			},
-			toBeMatched: "http://foo.bar/foo%2Fbaz/%5Bid%5D",
-			assert: func(t *testing.T, matched bool) {
-				t.Helper()
-
-				assert.True(t, matched)
-			},
-		},
-		{
-			uc:            "matches with urlencoded slash in path if allowed without decoding",
-			slashHandling: config.EncodedSlashesNoDecode,
-			matcher: func(t *testing.T) patternmatcher.PatternMatcher {
-				t.Helper()
-
-				matcher, err := patternmatcher.NewPatternMatcher("glob", "http://foo.bar/foo%2Fbaz/[id]")
-				require.NoError(t, err)
-
-				return matcher
-			},
-			toBeMatched: "http://foo.bar/foo%2Fbaz/%5Bid%5D",
-			assert: func(t *testing.T, matched bool) {
-				t.Helper()
-
-				assert.True(t, matched)
-			},
-		},
-		{
-			uc: "doesn't match",
-			matcher: func(t *testing.T) patternmatcher.PatternMatcher {
-				t.Helper()
-
-				matcher, err := patternmatcher.NewPatternMatcher("glob", "http://foo.bar/baz")
-				require.NoError(t, err)
-
-				return matcher
-			},
-			toBeMatched: "https://foo.bar/baz",
-			assert: func(t *testing.T, matched bool) {
-				t.Helper()
-
-				assert.False(t, matched)
-			},
-		},
-		{
-			uc: "query params are ignored while matching",
-			matcher: func(t *testing.T) patternmatcher.PatternMatcher {
-				t.Helper()
-
-				matcher, err := patternmatcher.NewPatternMatcher("glob", "http://foo.bar/baz")
-				require.NoError(t, err)
-
-				return matcher
-			},
-			toBeMatched: "https://foo.bar/baz?foo=bar",
-			assert: func(t *testing.T, matched bool) {
-				t.Helper()
-
-				assert.False(t, matched)
-			},
-		},
-	} {
-		t.Run("case="+tc.uc, func(t *testing.T) {
-			// GIVEN
-			rul := &ruleImpl{
-				urlMatcher:             tc.matcher(t),
-				encodedSlashesHandling: x.IfThenElse(len(tc.slashHandling) != 0, tc.slashHandling, config.EncodedSlashesOff),
-			}
-
-			tbmu, err := url.Parse(tc.toBeMatched)
-			require.NoError(t, err)
-
-			// WHEN
-			matched := rul.MatchesURL(tbmu)
-
-			// THEN
-			tc.assert(t, matched)
-		})
-	}
-}
 
 func TestRuleExecute(t *testing.T) {
 	t.Parallel()
 
-	for _, tc := range []struct {
-		uc             string
+	falseValue := false
+	trueValue := true
+
+	for uc, tc := range map[string]struct {
 		backend        *config.Backend
 		slashHandling  config.EncodedSlashesHandling
 		configureMocks func(
 			t *testing.T,
-			ctx *heimdallmocks.ContextMock,
+			ctx *heimdallmocks.RequestContextMock,
 			authenticator *mocks.SubjectCreatorMock,
 			authorizer *mocks.SubjectHandlerMock,
 			finalizer *mocks.SubjectHandlerMock,
 			errHandler *mocks.ErrorHandlerMock,
 		)
-		assert func(t *testing.T, err error, backend rule.Backend)
+		assert func(t *testing.T, err error, backend rule.Backend, captures map[string]string)
 	}{
-		{
-			uc: "authenticator fails, but error handler succeeds",
-			configureMocks: func(t *testing.T, ctx *heimdallmocks.ContextMock, authenticator *mocks.SubjectCreatorMock,
+		"authenticator fails, but error handler succeeds": {
+			configureMocks: func(t *testing.T, ctx *heimdallmocks.RequestContextMock, authenticator *mocks.SubjectCreatorMock,
 				_ *mocks.SubjectHandlerMock, _ *mocks.SubjectHandlerMock,
 				errHandler *mocks.ErrorHandlerMock,
 			) {
 				t.Helper()
 
-				authenticator.EXPECT().Execute(ctx).Return(nil, testsupport.ErrTestPurpose)
-				authenticator.EXPECT().IsFallbackOnErrorAllowed().Return(false)
-				errHandler.EXPECT().CanExecute(ctx, testsupport.ErrTestPurpose).Return(true)
-				errHandler.EXPECT().Execute(ctx, testsupport.ErrTestPurpose).Return(nil)
+				ctx.EXPECT().Request().Return(&heimdall.Request{URL: &heimdall.URL{}})
+
+				testErr := errors.New("test error")
+
+				authenticator.EXPECT().Execute(ctx).Return(nil, testErr)
+				errHandler.EXPECT().Execute(ctx, testErr).Return(nil)
 			},
-			assert: func(t *testing.T, err error, backend rule.Backend) {
+			assert: func(t *testing.T, err error, backend rule.Backend, _ map[string]string) {
 				t.Helper()
 
 				require.NoError(t, err)
 				assert.Nil(t, backend)
 			},
 		},
-		{
-			uc: "authenticator fails, and error handler fails",
-			configureMocks: func(t *testing.T, ctx *heimdallmocks.ContextMock, authenticator *mocks.SubjectCreatorMock,
+		"authenticator fails, and error handler fails": {
+			configureMocks: func(t *testing.T, ctx *heimdallmocks.RequestContextMock, authenticator *mocks.SubjectCreatorMock,
 				_ *mocks.SubjectHandlerMock, _ *mocks.SubjectHandlerMock,
 				errHandler *mocks.ErrorHandlerMock,
 			) {
 				t.Helper()
 
-				authenticator.EXPECT().Execute(ctx).Return(nil, testsupport.ErrTestPurpose)
-				authenticator.EXPECT().IsFallbackOnErrorAllowed().Return(false)
-				errHandler.EXPECT().CanExecute(ctx, testsupport.ErrTestPurpose).Return(true)
-				errHandler.EXPECT().Execute(ctx, testsupport.ErrTestPurpose).Return(testsupport.ErrTestPurpose2)
+				ctx.EXPECT().Request().Return(&heimdall.Request{URL: &heimdall.URL{}})
+
+				testErr := errors.New("test error")
+
+				authenticator.EXPECT().Execute(ctx).Return(nil, testErr)
+				errHandler.EXPECT().Execute(ctx, testErr).Return(errors.New("some error"))
 			},
-			assert: func(t *testing.T, err error, backend rule.Backend) {
+			assert: func(t *testing.T, err error, backend rule.Backend, _ map[string]string) {
 				t.Helper()
 
 				require.Error(t, err)
-				require.ErrorIs(t, err, testsupport.ErrTestPurpose2)
+				require.ErrorContains(t, err, "some error")
 				assert.Nil(t, backend)
 			},
 		},
-		{
-			uc: "authenticator succeeds, authorizer fails, but error handler succeeds",
-			configureMocks: func(t *testing.T, ctx *heimdallmocks.ContextMock, authenticator *mocks.SubjectCreatorMock,
+		"authenticator succeeds, authorizer fails, but error handler succeeds": {
+			configureMocks: func(t *testing.T, ctx *heimdallmocks.RequestContextMock, authenticator *mocks.SubjectCreatorMock,
 				authorizer *mocks.SubjectHandlerMock, _ *mocks.SubjectHandlerMock,
 				errHandler *mocks.ErrorHandlerMock,
 			) {
 				t.Helper()
 
+				ctx.EXPECT().Request().Return(&heimdall.Request{URL: &heimdall.URL{}})
+
 				sub := &subject.Subject{ID: "Foo"}
 
+				testErr := errors.New("test error")
+
 				authenticator.EXPECT().Execute(ctx).Return(sub, nil)
-				authorizer.EXPECT().Execute(ctx, sub).Return(testsupport.ErrTestPurpose)
+				authorizer.EXPECT().Execute(ctx, sub).Return(testErr)
 				authorizer.EXPECT().ContinueOnError().Return(false)
-				errHandler.EXPECT().CanExecute(ctx, testsupport.ErrTestPurpose).Return(true)
-				errHandler.EXPECT().Execute(ctx, testsupport.ErrTestPurpose).Return(nil)
+				errHandler.EXPECT().Execute(ctx, testErr).Return(nil)
 			},
-			assert: func(t *testing.T, err error, backend rule.Backend) {
+			assert: func(t *testing.T, err error, backend rule.Backend, _ map[string]string) {
 				t.Helper()
 
 				require.NoError(t, err)
 				assert.Nil(t, backend)
 			},
 		},
-		{
-			uc: "authenticator succeeds, authorizer fails and error handler fails",
-			configureMocks: func(t *testing.T, ctx *heimdallmocks.ContextMock, authenticator *mocks.SubjectCreatorMock,
+		"authenticator succeeds, authorizer fails and error handler fails": {
+			configureMocks: func(t *testing.T, ctx *heimdallmocks.RequestContextMock, authenticator *mocks.SubjectCreatorMock,
 				authorizer *mocks.SubjectHandlerMock, _ *mocks.SubjectHandlerMock,
 				errHandler *mocks.ErrorHandlerMock,
 			) {
 				t.Helper()
 
+				ctx.EXPECT().Request().Return(&heimdall.Request{URL: &heimdall.URL{}})
+
 				sub := &subject.Subject{ID: "Foo"}
 
+				testErr := errors.New("test error")
+
 				authenticator.EXPECT().Execute(ctx).Return(sub, nil)
-				authorizer.EXPECT().Execute(ctx, sub).Return(testsupport.ErrTestPurpose)
+				authorizer.EXPECT().Execute(ctx, sub).Return(testErr)
 				authorizer.EXPECT().ContinueOnError().Return(false)
-				errHandler.EXPECT().CanExecute(ctx, testsupport.ErrTestPurpose).Return(true)
-				errHandler.EXPECT().Execute(ctx, testsupport.ErrTestPurpose).Return(testsupport.ErrTestPurpose2)
+				errHandler.EXPECT().Execute(ctx, testErr).Return(errors.New("some error"))
 			},
-			assert: func(t *testing.T, err error, backend rule.Backend) {
+			assert: func(t *testing.T, err error, backend rule.Backend, _ map[string]string) {
 				t.Helper()
 
 				require.Error(t, err)
-				require.ErrorIs(t, err, testsupport.ErrTestPurpose2)
+				require.ErrorContains(t, err, "some error")
 				assert.Nil(t, backend)
 			},
 		},
-		{
-			uc: "authenticator succeeds, authorizer succeeds, finalizer fails, but error handler succeeds",
-			configureMocks: func(t *testing.T, ctx *heimdallmocks.ContextMock, authenticator *mocks.SubjectCreatorMock,
+		"authenticator succeeds, authorizer succeeds, finalizer fails, but error handler succeeds": {
+			configureMocks: func(t *testing.T, ctx *heimdallmocks.RequestContextMock, authenticator *mocks.SubjectCreatorMock,
 				authorizer *mocks.SubjectHandlerMock, finalizer *mocks.SubjectHandlerMock,
 				errHandler *mocks.ErrorHandlerMock,
 			) {
 				t.Helper()
 
+				ctx.EXPECT().Request().Return(&heimdall.Request{URL: &heimdall.URL{}})
+
 				sub := &subject.Subject{ID: "Foo"}
+
+				testErr := errors.New("test error")
 
 				authenticator.EXPECT().Execute(ctx).Return(sub, nil)
 				authorizer.EXPECT().Execute(ctx, sub).Return(nil)
-				finalizer.EXPECT().Execute(ctx, sub).Return(testsupport.ErrTestPurpose)
+				finalizer.EXPECT().Execute(ctx, sub).Return(testErr)
 				finalizer.EXPECT().ContinueOnError().Return(false)
-				errHandler.EXPECT().CanExecute(ctx, testsupport.ErrTestPurpose).Return(true)
-				errHandler.EXPECT().Execute(ctx, testsupport.ErrTestPurpose).Return(nil)
+				errHandler.EXPECT().Execute(ctx, testErr).Return(nil)
 			},
-			assert: func(t *testing.T, err error, backend rule.Backend) {
+			assert: func(t *testing.T, err error, backend rule.Backend, _ map[string]string) {
 				t.Helper()
 
 				require.NoError(t, err)
 				assert.Nil(t, backend)
 			},
 		},
-		{
-			uc: "authenticator succeeds, authorizer succeeds, finalizer fails and error handler fails",
-			configureMocks: func(t *testing.T, ctx *heimdallmocks.ContextMock, authenticator *mocks.SubjectCreatorMock,
+		"authenticator succeeds, authorizer succeeds, finalizer fails and error handler fails": {
+			configureMocks: func(t *testing.T, ctx *heimdallmocks.RequestContextMock, authenticator *mocks.SubjectCreatorMock,
 				authorizer *mocks.SubjectHandlerMock, finalizer *mocks.SubjectHandlerMock,
 				errHandler *mocks.ErrorHandlerMock,
 			) {
 				t.Helper()
 
+				ctx.EXPECT().Request().Return(&heimdall.Request{URL: &heimdall.URL{}})
+
 				sub := &subject.Subject{ID: "Foo"}
+
+				testErr := errors.New("test error")
 
 				authenticator.EXPECT().Execute(ctx).Return(sub, nil)
 				authorizer.EXPECT().Execute(ctx, sub).Return(nil)
-				finalizer.EXPECT().Execute(ctx, sub).Return(testsupport.ErrTestPurpose)
+				finalizer.EXPECT().Execute(ctx, sub).Return(testErr)
 				finalizer.EXPECT().ContinueOnError().Return(false)
-				errHandler.EXPECT().CanExecute(ctx, testsupport.ErrTestPurpose).Return(true)
-				errHandler.EXPECT().Execute(ctx, testsupport.ErrTestPurpose).Return(testsupport.ErrTestPurpose2)
+				errHandler.EXPECT().Execute(ctx, testErr).Return(errors.New("some error"))
 			},
-			assert: func(t *testing.T, err error, backend rule.Backend) {
+			assert: func(t *testing.T, err error, backend rule.Backend, _ map[string]string) {
 				t.Helper()
 
 				require.Error(t, err)
-				require.ErrorIs(t, err, testsupport.ErrTestPurpose2)
+				require.ErrorContains(t, err, "some error")
 				assert.Nil(t, backend)
 			},
 		},
-		{
-			uc: "all handler succeed with disallowed urlencoded slashes",
+		"all handler succeed with disallowed urlencoded slashes": {
+			slashHandling: config.EncodedSlashesOff,
 			backend: &config.Backend{
 				Host: "foo.bar",
 			},
-			configureMocks: func(t *testing.T, ctx *heimdallmocks.ContextMock, authenticator *mocks.SubjectCreatorMock,
+			configureMocks: func(t *testing.T, ctx *heimdallmocks.RequestContextMock, _ *mocks.SubjectCreatorMock,
+				_ *mocks.SubjectHandlerMock, _ *mocks.SubjectHandlerMock, _ *mocks.ErrorHandlerMock,
+			) {
+				t.Helper()
+
+				targetURL, _ := url.Parse("http://foo.local/api%2Fv1/foo%5Bid%5D")
+				ctx.EXPECT().Request().Return(&heimdall.Request{
+					URL: &heimdall.URL{
+						URL:      *targetURL,
+						Captures: map[string]string{"first": "api%2Fv1", "second": "foo%5Bid%5D"},
+					},
+				})
+			},
+			assert: func(t *testing.T, err error, _ rule.Backend, _ map[string]string) {
+				t.Helper()
+
+				require.Error(t, err)
+				require.ErrorIs(t, err, heimdall.ErrArgument)
+				require.ErrorContains(t, err, "path contains encoded slash")
+			},
+		},
+		"all handler succeed with urlencoded slashes on without urlencoded slash": {
+			slashHandling: config.EncodedSlashesOn,
+			backend: &config.Backend{
+				Host: "foo.bar",
+			},
+			configureMocks: func(t *testing.T, ctx *heimdallmocks.RequestContextMock, authenticator *mocks.SubjectCreatorMock,
 				authorizer *mocks.SubjectHandlerMock, finalizer *mocks.SubjectHandlerMock,
 				_ *mocks.ErrorHandlerMock,
 			) {
@@ -401,54 +243,33 @@ func TestRuleExecute(t *testing.T) {
 				finalizer.EXPECT().Execute(ctx, sub).Return(nil)
 
 				targetURL, _ := url.Parse("http://foo.local/api/v1/foo%5Bid%5D")
-				ctx.EXPECT().Request().Return(&heimdall.Request{URL: targetURL})
+				ctx.EXPECT().Request().Return(&heimdall.Request{
+					URL: &heimdall.URL{
+						URL:      *targetURL,
+						Captures: map[string]string{"first": "api", "second": "v1", "third": "foo%5Bid%5D"},
+					},
+				})
 			},
-			assert: func(t *testing.T, err error, backend rule.Backend) {
+			assert: func(t *testing.T, err error, backend rule.Backend, captures map[string]string) {
 				t.Helper()
 
 				require.NoError(t, err)
 
 				expectedURL, _ := url.Parse("http://foo.bar/api/v1/foo%5Bid%5D")
 				assert.Equal(t, expectedURL, backend.URL())
+				assert.True(t, backend.ForwardHostHeader())
+
+				assert.Equal(t, "api", captures["first"])
+				assert.Equal(t, "v1", captures["second"])
+				assert.Equal(t, "foo[id]", captures["third"])
 			},
 		},
-		{
-			uc:            "all handler succeed with urlencoded slashes on without urlencoded slash",
+		"all handler succeed with urlencoded slashes on with urlencoded slash": {
 			slashHandling: config.EncodedSlashesOn,
 			backend: &config.Backend{
 				Host: "foo.bar",
 			},
-			configureMocks: func(t *testing.T, ctx *heimdallmocks.ContextMock, authenticator *mocks.SubjectCreatorMock,
-				authorizer *mocks.SubjectHandlerMock, finalizer *mocks.SubjectHandlerMock,
-				_ *mocks.ErrorHandlerMock,
-			) {
-				t.Helper()
-
-				sub := &subject.Subject{ID: "Foo"}
-
-				authenticator.EXPECT().Execute(ctx).Return(sub, nil)
-				authorizer.EXPECT().Execute(ctx, sub).Return(nil)
-				finalizer.EXPECT().Execute(ctx, sub).Return(nil)
-
-				targetURL, _ := url.Parse("http://foo.local/api/v1/foo%5Bid%5D")
-				ctx.EXPECT().Request().Return(&heimdall.Request{URL: targetURL})
-			},
-			assert: func(t *testing.T, err error, backend rule.Backend) {
-				t.Helper()
-
-				require.NoError(t, err)
-
-				expectedURL, _ := url.Parse("http://foo.bar/api/v1/foo%5Bid%5D")
-				assert.Equal(t, expectedURL, backend.URL())
-			},
-		},
-		{
-			uc:            "all handler succeed with urlencoded slashes on with urlencoded slash",
-			slashHandling: config.EncodedSlashesOn,
-			backend: &config.Backend{
-				Host: "foo.bar",
-			},
-			configureMocks: func(t *testing.T, ctx *heimdallmocks.ContextMock, authenticator *mocks.SubjectCreatorMock,
+			configureMocks: func(t *testing.T, ctx *heimdallmocks.RequestContextMock, authenticator *mocks.SubjectCreatorMock,
 				authorizer *mocks.SubjectHandlerMock, finalizer *mocks.SubjectHandlerMock,
 				_ *mocks.ErrorHandlerMock,
 			) {
@@ -461,24 +282,32 @@ func TestRuleExecute(t *testing.T) {
 				finalizer.EXPECT().Execute(ctx, sub).Return(nil)
 
 				targetURL, _ := url.Parse("http://foo.local/api%2Fv1/foo%5Bid%5D")
-				ctx.EXPECT().Request().Return(&heimdall.Request{URL: targetURL})
+				ctx.EXPECT().Request().Return(&heimdall.Request{
+					URL: &heimdall.URL{
+						URL:      *targetURL,
+						Captures: map[string]string{"first": "api%2Fv1", "second": "foo%5Bid%5D"},
+					},
+				})
 			},
-			assert: func(t *testing.T, err error, backend rule.Backend) {
+			assert: func(t *testing.T, err error, backend rule.Backend, captures map[string]string) {
 				t.Helper()
 
 				require.NoError(t, err)
 
 				expectedURL, _ := url.Parse("http://foo.bar/api/v1/foo%5Bid%5D")
 				assert.Equal(t, expectedURL, backend.URL())
+				assert.True(t, backend.ForwardHostHeader())
+
+				assert.Equal(t, "api/v1", captures["first"])
+				assert.Equal(t, "foo[id]", captures["second"])
 			},
 		},
-		{
-			uc:            "all handler succeed with urlencoded slashes on with urlencoded slash but without decoding it",
-			slashHandling: config.EncodedSlashesNoDecode,
+		"all handler succeed with urlencoded slashes on with urlencoded slash but without decoding it": {
+			slashHandling: config.EncodedSlashesOnNoDecode,
 			backend: &config.Backend{
 				Host: "foo.bar",
 			},
-			configureMocks: func(t *testing.T, ctx *heimdallmocks.ContextMock, authenticator *mocks.SubjectCreatorMock,
+			configureMocks: func(t *testing.T, ctx *heimdallmocks.RequestContextMock, authenticator *mocks.SubjectCreatorMock,
 				authorizer *mocks.SubjectHandlerMock, finalizer *mocks.SubjectHandlerMock,
 				_ *mocks.ErrorHandlerMock,
 			) {
@@ -491,24 +320,32 @@ func TestRuleExecute(t *testing.T) {
 				finalizer.EXPECT().Execute(ctx, sub).Return(nil)
 
 				targetURL, _ := url.Parse("http://foo.local/api%2Fv1/foo%5Bid%5D")
-				ctx.EXPECT().Request().Return(&heimdall.Request{URL: targetURL})
+				ctx.EXPECT().Request().Return(&heimdall.Request{
+					URL: &heimdall.URL{
+						URL:      *targetURL,
+						Captures: map[string]string{"first": "api%2Fv1", "second": "foo%5Bid%5D"},
+					},
+				})
 			},
-			assert: func(t *testing.T, err error, backend rule.Backend) {
+			assert: func(t *testing.T, err error, backend rule.Backend, captures map[string]string) {
 				t.Helper()
 
 				require.NoError(t, err)
 
 				expectedURL, _ := url.Parse("http://foo.bar/api%2Fv1/foo%5Bid%5D")
 				assert.Equal(t, expectedURL, backend.URL())
+				assert.True(t, backend.ForwardHostHeader())
+
+				assert.Equal(t, "api%2Fv1", captures["first"])
+				assert.Equal(t, "foo[id]", captures["second"])
 			},
 		},
-		{
-			uc: "stripping path prefix",
+		"stripping path prefix": {
 			backend: &config.Backend{
 				Host:        "foo.bar",
 				URLRewriter: &config.URLRewriter{PathPrefixToCut: "/api/v1"},
 			},
-			configureMocks: func(t *testing.T, ctx *heimdallmocks.ContextMock, authenticator *mocks.SubjectCreatorMock,
+			configureMocks: func(t *testing.T, ctx *heimdallmocks.RequestContextMock, authenticator *mocks.SubjectCreatorMock,
 				authorizer *mocks.SubjectHandlerMock, finalizer *mocks.SubjectHandlerMock,
 				_ *mocks.ErrorHandlerMock,
 			) {
@@ -521,22 +358,83 @@ func TestRuleExecute(t *testing.T) {
 				finalizer.EXPECT().Execute(ctx, sub).Return(nil)
 
 				targetURL, _ := url.Parse("http://foo.local/api/v1/foo")
-				ctx.EXPECT().Request().Return(&heimdall.Request{URL: targetURL})
+				ctx.EXPECT().Request().Return(&heimdall.Request{URL: &heimdall.URL{URL: *targetURL}})
 			},
-			assert: func(t *testing.T, err error, backend rule.Backend) {
+			assert: func(t *testing.T, err error, backend rule.Backend, _ map[string]string) {
 				t.Helper()
 
 				require.NoError(t, err)
 
 				expectedURL, _ := url.Parse("http://foo.bar/foo")
 				assert.Equal(t, expectedURL, backend.URL())
+				assert.True(t, backend.ForwardHostHeader())
+			},
+		},
+		"not forwarding Host header": {
+			backend: &config.Backend{
+				Host:              "foo.bar",
+				ForwardHostHeader: &falseValue,
+			},
+			configureMocks: func(t *testing.T, ctx *heimdallmocks.RequestContextMock, authenticator *mocks.SubjectCreatorMock,
+				authorizer *mocks.SubjectHandlerMock, finalizer *mocks.SubjectHandlerMock,
+				_ *mocks.ErrorHandlerMock,
+			) {
+				t.Helper()
+
+				sub := &subject.Subject{ID: "Foo"}
+
+				authenticator.EXPECT().Execute(ctx).Return(sub, nil)
+				authorizer.EXPECT().Execute(ctx, sub).Return(nil)
+				finalizer.EXPECT().Execute(ctx, sub).Return(nil)
+
+				targetURL, _ := url.Parse("http://foo.local/api/v1/foo")
+				ctx.EXPECT().Request().Return(&heimdall.Request{URL: &heimdall.URL{URL: *targetURL}})
+			},
+			assert: func(t *testing.T, err error, backend rule.Backend, _ map[string]string) {
+				t.Helper()
+
+				require.NoError(t, err)
+
+				expectedURL, _ := url.Parse("http://foo.bar/api/v1/foo")
+				assert.Equal(t, expectedURL, backend.URL())
+				assert.False(t, backend.ForwardHostHeader())
+			},
+		},
+		"explicitly forwarding Host header": {
+			backend: &config.Backend{
+				Host:              "foo.bar",
+				ForwardHostHeader: &trueValue,
+			},
+			configureMocks: func(t *testing.T, ctx *heimdallmocks.RequestContextMock, authenticator *mocks.SubjectCreatorMock,
+				authorizer *mocks.SubjectHandlerMock, finalizer *mocks.SubjectHandlerMock,
+				_ *mocks.ErrorHandlerMock,
+			) {
+				t.Helper()
+
+				sub := &subject.Subject{ID: "Foo"}
+
+				authenticator.EXPECT().Execute(ctx).Return(sub, nil)
+				authorizer.EXPECT().Execute(ctx, sub).Return(nil)
+				finalizer.EXPECT().Execute(ctx, sub).Return(nil)
+
+				targetURL, _ := url.Parse("http://foo.local/api/v1/foo")
+				ctx.EXPECT().Request().Return(&heimdall.Request{URL: &heimdall.URL{URL: *targetURL}})
+			},
+			assert: func(t *testing.T, err error, backend rule.Backend, _ map[string]string) {
+				t.Helper()
+
+				require.NoError(t, err)
+
+				expectedURL, _ := url.Parse("http://foo.bar/api/v1/foo")
+				assert.Equal(t, expectedURL, backend.URL())
+				assert.True(t, backend.ForwardHostHeader())
 			},
 		},
 	} {
-		t.Run("case="+tc.uc, func(t *testing.T) {
+		t.Run(uc, func(t *testing.T) {
 			// GIVEN
-			ctx := heimdallmocks.NewContextMock(t)
-			ctx.EXPECT().AppContext().Return(context.Background())
+			ctx := heimdallmocks.NewRequestContextMock(t)
+			ctx.EXPECT().Context().Return(t.Context())
 
 			authenticator := mocks.NewSubjectCreatorMock(t)
 			authorizer := mocks.NewSubjectHandlerMock(t)
@@ -544,12 +442,12 @@ func TestRuleExecute(t *testing.T) {
 			errHandler := mocks.NewErrorHandlerMock(t)
 
 			rul := &ruleImpl{
-				backend:                tc.backend,
-				encodedSlashesHandling: x.IfThenElse(len(tc.slashHandling) != 0, tc.slashHandling, config.EncodedSlashesOff),
-				sc:                     compositeSubjectCreator{authenticator},
-				sh:                     compositeSubjectHandler{authorizer},
-				fi:                     compositeSubjectHandler{finalizer},
-				eh:                     compositeErrorHandler{errHandler},
+				backend:         tc.backend,
+				slashesHandling: x.IfThenElse(len(tc.slashHandling) != 0, tc.slashHandling, config.EncodedSlashesOff),
+				sc:              compositeSubjectCreator{authenticator},
+				sh:              compositeSubjectHandler{authorizer},
+				fi:              compositeSubjectHandler{finalizer},
+				eh:              compositeErrorHandler{errHandler},
 			}
 
 			tc.configureMocks(t, ctx, authenticator, authorizer, finalizer, errHandler)
@@ -558,7 +456,7 @@ func TestRuleExecute(t *testing.T) {
 			upstream, err := rul.Execute(ctx)
 
 			// THEN
-			tc.assert(t, err, upstream)
+			tc.assert(t, err, upstream, ctx.Request().URL.Captures)
 		})
 	}
 }

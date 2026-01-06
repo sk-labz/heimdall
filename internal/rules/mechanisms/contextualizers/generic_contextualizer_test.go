@@ -17,7 +17,6 @@
 package contextualizers
 
 import (
-	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -28,18 +27,22 @@ import (
 	"time"
 
 	"github.com/goccy/go-json"
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/dadrus/heimdall/internal/app"
 	"github.com/dadrus/heimdall/internal/cache"
 	"github.com/dadrus/heimdall/internal/cache/mocks"
+	"github.com/dadrus/heimdall/internal/config"
 	"github.com/dadrus/heimdall/internal/heimdall"
 	heimdallmocks "github.com/dadrus/heimdall/internal/heimdall/mocks"
 	"github.com/dadrus/heimdall/internal/rules/endpoint"
 	"github.com/dadrus/heimdall/internal/rules/mechanisms/subject"
 	"github.com/dadrus/heimdall/internal/rules/mechanisms/template"
 	"github.com/dadrus/heimdall/internal/rules/mechanisms/values"
+	"github.com/dadrus/heimdall/internal/validation"
 	"github.com/dadrus/heimdall/internal/x"
 	"github.com/dadrus/heimdall/internal/x/testsupport"
 )
@@ -47,14 +50,12 @@ import (
 func TestCreateGenericContextualizer(t *testing.T) {
 	t.Parallel()
 
-	for _, tc := range []struct {
-		uc     string
-		id     string
-		config []byte
-		assert func(t *testing.T, err error, contextualizer *genericContextualizer)
+	for uc, tc := range map[string]struct {
+		enforceTLS bool
+		config     []byte
+		assert     func(t *testing.T, err error, contextualizer *genericContextualizer)
 	}{
-		{
-			uc: "with unsupported fields",
+		"with unsupported fields": {
 			config: []byte(`
 endpoint:
   url: http://foo.bar
@@ -65,11 +66,10 @@ foo: bar
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrConfiguration)
-				assert.Contains(t, err.Error(), "failed decoding")
+				require.ErrorContains(t, err, "failed decoding")
 			},
 		},
-		{
-			uc: "with invalid endpoint configuration",
+		"with invalid endpoint configuration": {
 			config: []byte(`
 endpoint:
   method: POST
@@ -80,15 +80,14 @@ payload: bar
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrConfiguration)
-				assert.Contains(t, err.Error(), "'endpoint'.'url' is a required field")
+				require.ErrorContains(t, err, "'endpoint'.'url' is a required field")
 			},
 		},
-		{
-			uc: "with default cache",
-			id: "contextualizer",
+		"with minimal valid configuration and enforced and used TLS": {
+			enforceTLS: true,
 			config: []byte(`
 endpoint:
-  url: http://foo.bar
+  url: https://foo.bar
 payload: bar
 `),
 			assert: func(t *testing.T, err error, contextualizer *genericContextualizer) {
@@ -97,7 +96,7 @@ payload: bar
 				require.NoError(t, err)
 				require.NotNil(t, contextualizer)
 
-				assert.Equal(t, "http://foo.bar", contextualizer.e.URL)
+				assert.Equal(t, "https://foo.bar", contextualizer.e.URL)
 				require.NotNil(t, contextualizer.payload)
 				val, err := contextualizer.payload.Render(map[string]any{
 					"Subject": &subject.Subject{ID: "baz"},
@@ -109,13 +108,27 @@ payload: bar
 				assert.Equal(t, defaultTTL, contextualizer.ttl)
 				assert.False(t, contextualizer.ContinueOnError())
 
-				assert.Equal(t, "contextualizer", contextualizer.ID())
+				assert.Equal(t, "with minimal valid configuration and enforced and used TLS", contextualizer.ID())
+				assert.Equal(t, contextualizer.Name(), contextualizer.ID())
 				assert.False(t, contextualizer.ContinueOnError())
 			},
 		},
-		{
-			uc: "with all fields configured",
-			id: "contextualizer",
+		"with minimal valid configuration and enforced but not used TLS": {
+			enforceTLS: true,
+			config: []byte(`
+endpoint:
+  url: http://foo.bar
+payload: bar
+`),
+			assert: func(t *testing.T, err error, _ *genericContextualizer) {
+				t.Helper()
+
+				require.Error(t, err)
+				require.ErrorIs(t, err, heimdall.ErrConfiguration)
+				require.Contains(t, err.Error(), "'endpoint'.'url' scheme must be https")
+			},
+		},
+		"with all fields configured": {
 			config: []byte(`
 endpoint:
   url: http://bar.foo
@@ -156,17 +169,29 @@ continue_pipeline_on_error: true
 				require.NoError(t, err)
 				assert.Equal(t, map[string]string{"foo": "bar"}, res)
 
-				assert.Equal(t, "contextualizer", contextualizer.ID())
+				assert.Equal(t, contextualizer.Name(), contextualizer.ID())
+				assert.Equal(t, "with all fields configured", contextualizer.ID())
 				assert.True(t, contextualizer.ContinueOnError())
 			},
 		},
 	} {
-		t.Run("case="+tc.uc, func(t *testing.T) {
+		t.Run(uc, func(t *testing.T) {
 			conf, err := testsupport.DecodeTestConfig(tc.config)
 			require.NoError(t, err)
 
+			es := config.EnforcementSettings{EnforceEgressTLS: tc.enforceTLS}
+			validator, err := validation.NewValidator(
+				validation.WithTagValidator(es),
+				validation.WithErrorTranslator(es),
+			)
+			require.NoError(t, err)
+
+			appCtx := app.NewContextMock(t)
+			appCtx.EXPECT().Validator().Maybe().Return(validator)
+			appCtx.EXPECT().Logger().Return(log.Logger)
+
 			// WHEN
-			contextualizer, err := newGenericContextualizer(tc.id, conf)
+			contextualizer, err := newGenericContextualizer(appCtx, uc, conf)
 
 			// THEN
 			tc.assert(t, err, contextualizer)
@@ -177,16 +202,13 @@ continue_pipeline_on_error: true
 func TestCreateGenericContextualizerFromPrototype(t *testing.T) {
 	t.Parallel()
 
-	for _, tc := range []struct {
-		uc              string
-		id              string
+	for uc, tc := range map[string]struct {
 		prototypeConfig []byte
 		config          []byte
+		stepID          string
 		assert          func(t *testing.T, err error, prototype *genericContextualizer, configured *genericContextualizer)
 	}{
-		{
-			uc: "with empty config",
-			id: "contextualizer1",
+		"with empty target config and no step id": {
 			prototypeConfig: []byte(`
 endpoint:
   url: http://foo.bar
@@ -198,11 +220,26 @@ payload: bar
 				require.NoError(t, err)
 
 				assert.Equal(t, prototype, configured)
-				assert.Equal(t, "contextualizer1", configured.ID())
 			},
 		},
-		{
-			uc: "with unsupported fields",
+		"with empty target config but with step id": {
+			prototypeConfig: []byte(`
+endpoint:
+  url: http://foo.bar
+payload: bar
+`),
+			stepID: "foo",
+			assert: func(t *testing.T, err error, prototype *genericContextualizer, configured *genericContextualizer) {
+				t.Helper()
+
+				require.NoError(t, err)
+
+				assert.NotEqual(t, prototype, configured)
+				assert.Equal(t, prototype.Name(), configured.Name())
+				assert.Equal(t, "foo", configured.ID())
+			},
+		},
+		"with unsupported fields": {
 			prototypeConfig: []byte(`
 endpoint:
   url: http://foo.bar
@@ -214,12 +251,10 @@ payload: bar
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrConfiguration)
-				assert.Contains(t, err.Error(), "failed decoding")
+				require.ErrorContains(t, err, "failed decoding")
 			},
 		},
-		{
-			uc: "with only payload reconfigured",
-			id: "contextualizer2",
+		"with only payload reconfigured": {
 			prototypeConfig: []byte(`
 endpoint:
   url: http://foo.bar
@@ -252,14 +287,14 @@ payload: foo
 				assert.Equal(t, prototype.fwdHeaders, configured.fwdHeaders)
 				assert.Equal(t, prototype.fwdCookies, configured.fwdCookies)
 				assert.Equal(t, prototype.ttl, configured.ttl)
-				assert.Equal(t, "contextualizer2", configured.ID())
+				assert.Equal(t, "with only payload reconfigured", configured.ID())
+				assert.Equal(t, configured.Name(), configured.ID())
+				assert.Equal(t, prototype.Name(), configured.ID())
 				assert.False(t, prototype.ContinueOnError())
 				assert.False(t, configured.ContinueOnError())
 			},
 		},
-		{
-			uc: "with payload and forward_headers reconfigured",
-			id: "contextualizer3",
+		"with payload and forward_headers reconfigured": {
 			prototypeConfig: []byte(`
 endpoint:
   url: http://foo.bar
@@ -296,14 +331,14 @@ forward_headers:
 				assert.Contains(t, configured.fwdHeaders, "Foo-Bar")
 				assert.Equal(t, prototype.fwdCookies, configured.fwdCookies)
 				assert.Equal(t, prototype.ttl, configured.ttl)
-				assert.Equal(t, "contextualizer3", configured.ID())
+				assert.Equal(t, "with payload and forward_headers reconfigured", configured.ID())
+				assert.Equal(t, configured.Name(), configured.ID())
+				assert.Equal(t, prototype.Name(), configured.ID())
 				assert.False(t, prototype.ContinueOnError())
 				assert.False(t, configured.ContinueOnError())
 			},
 		},
-		{
-			uc: "with payload, forward_headers and forward_cookies reconfigured",
-			id: "contextualizer4",
+		"with payload, forward_headers and forward_cookies reconfigured": {
 			prototypeConfig: []byte(`
 endpoint:
   url: http://foo.bar
@@ -345,14 +380,14 @@ forward_cookies:
 				assert.Len(t, configured.fwdCookies, 1)
 				assert.Contains(t, configured.fwdCookies, "Foo-Session")
 				assert.Equal(t, prototype.ttl, configured.ttl)
-				assert.Equal(t, "contextualizer4", configured.ID())
+				assert.Equal(t, "with payload, forward_headers and forward_cookies reconfigured", configured.ID())
+				assert.Equal(t, configured.Name(), configured.ID())
+				assert.Equal(t, prototype.Name(), configured.ID())
 				assert.True(t, prototype.ContinueOnError())
 				assert.True(t, configured.ContinueOnError())
 			},
 		},
-		{
-			uc: "with everything possible, but values reconfigured",
-			id: "contextualizer5",
+		"with everything possible, but values reconfigured": {
 			prototypeConfig: []byte(`
 endpoint:
   url: http://foo.bar
@@ -400,14 +435,14 @@ continue_pipeline_on_error: false
 				assert.NotEqual(t, prototype.ttl, configured.ttl)
 				assert.Equal(t, 15*time.Second, configured.ttl)
 				assert.Equal(t, prototype.v, configured.v)
-				assert.Equal(t, "contextualizer5", configured.ID())
+				assert.Equal(t, "with everything possible, but values reconfigured", configured.ID())
+				assert.Equal(t, configured.Name(), configured.ID())
+				assert.Equal(t, prototype.Name(), configured.ID())
 				assert.True(t, prototype.ContinueOnError())
 				assert.False(t, configured.ContinueOnError())
 			},
 		},
-		{
-			uc: "with everything possible reconfigured",
-			id: "contextualizer5",
+		"with everything possible reconfigured and a step id": {
 			prototypeConfig: []byte(`
 endpoint:
   url: http://foo.bar
@@ -433,6 +468,7 @@ values:
   bar: foo
 continue_pipeline_on_error: false
 `),
+			stepID: "bar",
 			assert: func(t *testing.T, err error, prototype *genericContextualizer, configured *genericContextualizer) {
 				t.Helper()
 
@@ -444,7 +480,6 @@ continue_pipeline_on_error: false
 				res, err := configured.v.Render(map[string]any{})
 				require.NoError(t, err)
 				assert.Equal(t, map[string]string{"bar": "foo", "foo": "bar"}, res)
-				assert.Equal(t, prototype.id, configured.id)
 				assert.NotEqual(t, prototype.payload, configured.payload)
 				require.NotNil(t, configured.payload)
 				val, err := configured.payload.Render(map[string]any{
@@ -460,24 +495,36 @@ continue_pipeline_on_error: false
 				assert.Contains(t, configured.fwdCookies, "Foo-Session")
 				assert.NotEqual(t, prototype.ttl, configured.ttl)
 				assert.Equal(t, 15*time.Second, configured.ttl)
-				assert.Equal(t, "contextualizer5", configured.ID())
+				assert.Equal(t, prototype.Name(), prototype.ID())
+				assert.Equal(t, prototype.Name(), configured.Name())
+				assert.Equal(t, "with everything possible reconfigured and a step id", prototype.ID())
+				assert.Equal(t, "bar", configured.ID())
 				assert.True(t, prototype.ContinueOnError())
 				assert.False(t, configured.ContinueOnError())
 			},
 		},
 	} {
-		t.Run("case="+tc.uc, func(t *testing.T) {
+		t.Run(uc, func(t *testing.T) {
 			pc, err := testsupport.DecodeTestConfig(tc.prototypeConfig)
 			require.NoError(t, err)
 
 			conf, err := testsupport.DecodeTestConfig(tc.config)
 			require.NoError(t, err)
 
-			prototype, err := newGenericContextualizer(tc.id, pc)
+			validator, err := validation.NewValidator(
+				validation.WithTagValidator(config.EnforcementSettings{}),
+			)
+			require.NoError(t, err)
+
+			appCtx := app.NewContextMock(t)
+			appCtx.EXPECT().Validator().Return(validator)
+			appCtx.EXPECT().Logger().Return(log.Logger)
+
+			prototype, err := newGenericContextualizer(appCtx, uc, pc)
 			require.NoError(t, err)
 
 			// WHEN
-			concrete, err := prototype.WithConfig(conf)
+			concrete, err := prototype.WithConfig(tc.stepID, conf)
 
 			// THEN
 			var (
@@ -516,42 +563,39 @@ func TestGenericContextualizerExecute(t *testing.T) {
 			w.Header().Set("Content-Type", responseContentType)
 			w.Header().Set("Content-Length", strconv.Itoa(len(responseContent)))
 			_, err := w.Write(responseContent)
-			require.NoError(t, err)
+			assert.NoError(t, err)
 		}
 
 		w.WriteHeader(responseCode)
 	}))
 	defer srv.Close()
 
-	for _, tc := range []struct {
-		uc               string
+	for uc, tc := range map[string]struct {
 		contextualizer   *genericContextualizer
 		subject          *subject.Subject
 		instructServer   func(t *testing.T)
-		configureContext func(t *testing.T, ctx *heimdallmocks.ContextMock)
+		configureContext func(t *testing.T, ctx *heimdallmocks.RequestContextMock)
 		configureCache   func(t *testing.T, cch *mocks.CacheMock, contextualizer *genericContextualizer,
 			sub *subject.Subject)
-		assert func(t *testing.T, err error, sub *subject.Subject)
+		assert func(t *testing.T, err error, sub *subject.Subject, outputs map[string]any)
 	}{
-		{
-			uc:             "fails due to nil subject",
+		"fails due to nil subject": {
 			contextualizer: &genericContextualizer{id: "contextualizer", e: endpoint.Endpoint{URL: srv.URL}},
-			assert: func(t *testing.T, err error, _ *subject.Subject) {
+			assert: func(t *testing.T, err error, _ *subject.Subject, _ map[string]any) {
 				t.Helper()
 
 				assert.False(t, remoteEndpointCalled)
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrInternal)
-				assert.Contains(t, err.Error(), "'nil' subject")
+				require.ErrorContains(t, err, "'nil' subject")
 
 				var identifier interface{ ID() string }
 				require.ErrorAs(t, err, &identifier)
 				assert.Equal(t, "contextualizer", identifier.ID())
 			},
 		},
-		{
-			uc: "with successful cache hit",
+		"with successful cache hit": {
 			contextualizer: &genericContextualizer{
 				id:  "contextualizer",
 				e:   endpoint.Endpoint{URL: srv.URL},
@@ -563,7 +607,7 @@ func TestGenericContextualizerExecute(t *testing.T) {
 				}(),
 			},
 			subject: &subject.Subject{ID: "Foo", Attributes: map[string]any{"bar": "baz"}},
-			configureContext: func(t *testing.T, ctx *heimdallmocks.ContextMock) {
+			configureContext: func(t *testing.T, ctx *heimdallmocks.RequestContextMock) {
 				t.Helper()
 
 				ctx.EXPECT().Request().Return(nil)
@@ -578,18 +622,21 @@ func TestGenericContextualizerExecute(t *testing.T) {
 
 				cch.EXPECT().Get(mock.Anything, mock.Anything).Return(rawData, nil)
 			},
-			assert: func(t *testing.T, err error, sub *subject.Subject) {
+			assert: func(t *testing.T, err error, sub *subject.Subject, outputs map[string]any) {
 				t.Helper()
 
 				assert.False(t, remoteEndpointCalled)
 
 				require.NoError(t, err)
-				assert.Len(t, sub.Attributes, 2)
-				assert.Equal(t, "Hi Foo", sub.Attributes["contextualizer"])
+				assert.Len(t, sub.Attributes, 1)
+				assert.Equal(t, "baz", sub.Attributes["bar"])
+
+				assert.Len(t, outputs, 2)
+				assert.Equal(t, "Hi Foo", outputs["contextualizer"])
+				assert.Equal(t, "bar", outputs["foo"])
 			},
 		},
-		{
-			uc: "with error in values rendering",
+		"with error in values rendering": {
 			contextualizer: &genericContextualizer{
 				id: "contextualizer1",
 				e:  endpoint.Endpoint{URL: srv.URL},
@@ -601,27 +648,26 @@ func TestGenericContextualizerExecute(t *testing.T) {
 				}(),
 			},
 			subject: &subject.Subject{ID: "Foo", Attributes: map[string]any{"bar": "baz"}},
-			configureContext: func(t *testing.T, ctx *heimdallmocks.ContextMock) {
+			configureContext: func(t *testing.T, ctx *heimdallmocks.RequestContextMock) {
 				t.Helper()
 
 				ctx.EXPECT().Request().Return(nil)
 			},
-			assert: func(t *testing.T, err error, _ *subject.Subject) {
+			assert: func(t *testing.T, err error, _ *subject.Subject, _ map[string]any) {
 				t.Helper()
 
 				assert.False(t, remoteEndpointCalled)
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrInternal)
-				assert.Contains(t, err.Error(), "failed to render values")
+				require.ErrorContains(t, err, "failed to render values")
 
 				var identifier interface{ ID() string }
 				require.ErrorAs(t, err, &identifier)
 				assert.Equal(t, "contextualizer1", identifier.ID())
 			},
 		},
-		{
-			uc: "with error in payload rendering",
+		"with error in payload rendering": {
 			contextualizer: &genericContextualizer{
 				id: "contextualizer1",
 				e:  endpoint.Endpoint{URL: srv.URL},
@@ -633,53 +679,51 @@ func TestGenericContextualizerExecute(t *testing.T) {
 				}(),
 			},
 			subject: &subject.Subject{ID: "Foo", Attributes: map[string]any{"bar": "baz"}},
-			configureContext: func(t *testing.T, ctx *heimdallmocks.ContextMock) {
+			configureContext: func(t *testing.T, ctx *heimdallmocks.RequestContextMock) {
 				t.Helper()
 
 				ctx.EXPECT().Request().Return(nil)
 			},
-			assert: func(t *testing.T, err error, _ *subject.Subject) {
+			assert: func(t *testing.T, err error, _ *subject.Subject, _ map[string]any) {
 				t.Helper()
 
 				assert.False(t, remoteEndpointCalled)
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrInternal)
-				assert.Contains(t, err.Error(), "failed to render payload")
+				require.ErrorContains(t, err, "failed to render payload")
 
 				var identifier interface{ ID() string }
 				require.ErrorAs(t, err, &identifier)
 				assert.Equal(t, "contextualizer1", identifier.ID())
 			},
 		},
-		{
-			uc: "with communication error (dns)",
+		"with communication error (dns)": {
 			contextualizer: &genericContextualizer{
 				id: "contextualizer2",
 				e:  endpoint.Endpoint{URL: "http://heimdall.test.local"},
 			},
 			subject: &subject.Subject{ID: "Foo", Attributes: map[string]any{"bar": "baz"}},
-			configureContext: func(t *testing.T, ctx *heimdallmocks.ContextMock) {
+			configureContext: func(t *testing.T, ctx *heimdallmocks.RequestContextMock) {
 				t.Helper()
 
 				ctx.EXPECT().Request().Return(nil)
 			},
-			assert: func(t *testing.T, err error, _ *subject.Subject) {
+			assert: func(t *testing.T, err error, _ *subject.Subject, _ map[string]any) {
 				t.Helper()
 
 				assert.False(t, remoteEndpointCalled)
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrCommunication)
-				assert.Contains(t, err.Error(), "contextualizer endpoint failed")
+				require.ErrorContains(t, err, "contextualizer endpoint failed")
 
 				var identifier interface{ ID() string }
 				require.ErrorAs(t, err, &identifier)
 				assert.Equal(t, "contextualizer2", identifier.ID())
 			},
 		},
-		{
-			uc: "with unexpected response code from server",
+		"with unexpected response code from server": {
 			contextualizer: &genericContextualizer{
 				id: "contextualizer3",
 				e:  endpoint.Endpoint{URL: srv.URL},
@@ -690,27 +734,26 @@ func TestGenericContextualizerExecute(t *testing.T) {
 
 				responseCode = http.StatusInternalServerError
 			},
-			configureContext: func(t *testing.T, ctx *heimdallmocks.ContextMock) {
+			configureContext: func(t *testing.T, ctx *heimdallmocks.RequestContextMock) {
 				t.Helper()
 
 				ctx.EXPECT().Request().Return(nil)
 			},
-			assert: func(t *testing.T, err error, _ *subject.Subject) {
+			assert: func(t *testing.T, err error, _ *subject.Subject, _ map[string]any) {
 				t.Helper()
 
 				assert.True(t, remoteEndpointCalled)
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrCommunication)
-				assert.Contains(t, err.Error(), "unexpected response code")
+				require.ErrorContains(t, err, "unexpected response code")
 
 				var identifier interface{ ID() string }
 				require.ErrorAs(t, err, &identifier)
 				assert.Equal(t, "contextualizer3", identifier.ID())
 			},
 		},
-		{
-			uc: "without payload, but values, without cache hit",
+		"without payload, but values, without cache hit": {
 			contextualizer: &genericContextualizer{
 				id:  "test-contextualizer",
 				ttl: 5 * time.Second,
@@ -734,7 +777,7 @@ func TestGenericContextualizerExecute(t *testing.T) {
 
 				responseCode = http.StatusAccepted
 			},
-			configureContext: func(t *testing.T, ctx *heimdallmocks.ContextMock) {
+			configureContext: func(t *testing.T, ctx *heimdallmocks.RequestContextMock) {
 				t.Helper()
 
 				ctx.EXPECT().Request().Return(nil)
@@ -747,7 +790,7 @@ func TestGenericContextualizerExecute(t *testing.T) {
 				cch.EXPECT().Get(mock.Anything, mock.Anything).Return(nil, errors.New("no cache entry"))
 				cch.EXPECT().Set(mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 			},
-			assert: func(t *testing.T, err error, sub *subject.Subject) {
+			assert: func(t *testing.T, err error, sub *subject.Subject, outputs map[string]any) {
 				t.Helper()
 
 				assert.True(t, remoteEndpointCalled)
@@ -755,10 +798,10 @@ func TestGenericContextualizerExecute(t *testing.T) {
 				require.NoError(t, err)
 
 				assert.Len(t, sub.Attributes, 1)
+				assert.Len(t, outputs, 1)
 			},
 		},
-		{
-			uc: "without payload, but with cache",
+		"without payload, but with cache": {
 			contextualizer: &genericContextualizer{
 				id:  "test-contextualizer",
 				e:   endpoint.Endpoint{URL: srv.URL + "/{{ .Subject.ID }}"},
@@ -778,7 +821,7 @@ func TestGenericContextualizerExecute(t *testing.T) {
 					return err == nil && val.Payload == "Hi from endpoint"
 				}), contextualizer.ttl).Return(nil)
 			},
-			configureContext: func(t *testing.T, ctx *heimdallmocks.ContextMock) {
+			configureContext: func(t *testing.T, ctx *heimdallmocks.RequestContextMock) {
 				t.Helper()
 
 				ctx.EXPECT().Request().Return(nil)
@@ -796,26 +839,28 @@ func TestGenericContextualizerExecute(t *testing.T) {
 				responseContent = []byte(`Hi from endpoint`)
 				responseCode = http.StatusOK
 			},
-			assert: func(t *testing.T, err error, sub *subject.Subject) {
+			assert: func(t *testing.T, err error, sub *subject.Subject, outputs map[string]any) {
 				t.Helper()
 
 				assert.True(t, remoteEndpointCalled)
 
 				require.NoError(t, err)
 
-				assert.Len(t, sub.Attributes, 2)
+				assert.Len(t, sub.Attributes, 1)
+				assert.Len(t, outputs, 2)
+				assert.Equal(t, "Hi from endpoint", outputs["test-contextualizer"])
 			},
 		},
-		{
-			uc: "with rendered payload and headers, as well as forwarded headers and cookies",
+		"with rendered payload and headers, as well as forwarded headers and cookies": {
 			contextualizer: &genericContextualizer{
 				id: "test-contextualizer",
 				e: endpoint.Endpoint{
-					URL: srv.URL + "/{{ .Subject.ID }}",
+					URL: srv.URL + "/{{ .Subject.ID }}/{{ .Outputs.foo }}",
 					Headers: map[string]string{
 						"Content-Type": "application/json",
 						"Accept":       "application/json",
 						"X-Bar":        "{{ .Subject.Attributes.bar }}",
+						"X-Foo":        "{{ .Outputs.foo }}",
 					},
 				},
 				v: func() values.Values {
@@ -827,7 +872,8 @@ func TestGenericContextualizerExecute(t *testing.T) {
 					tpl, _ := template.New(`
 {
 	"user_id": {{ quote .Subject.ID }},
-	"value": {{ quote .Values.foo }}
+	"value": {{ quote .Values.foo }},
+    "foo": {{ quote .Outputs.foo }}
 }
 `)
 
@@ -843,10 +889,11 @@ func TestGenericContextualizerExecute(t *testing.T) {
 				checkRequest = func(req *http.Request) {
 					t.Helper()
 
-					assert.Equal(t, "/Foo", req.URL.Path)
+					assert.Equal(t, "/Foo/bar", req.URL.Path)
 					assert.Equal(t, "application/json", req.Header.Get("Content-Type"))
 					assert.Equal(t, "application/json", req.Header.Get("Accept"))
 					assert.Equal(t, "baz", req.Header.Get("X-Bar"))
+					assert.Equal(t, "bar", req.Header.Get("X-Foo"))
 					assert.Equal(t, "Hi Foo", req.Header.Get("X-Bar-Foo"))
 					cookie, err := req.Cookie("X-Foo-Session")
 					require.NoError(t, err)
@@ -855,14 +902,14 @@ func TestGenericContextualizerExecute(t *testing.T) {
 					content, err := io.ReadAll(req.Body)
 					require.NoError(t, err)
 
-					assert.JSONEq(t, `{"user_id": "Foo", "value": "bar"}`, string(content))
+					assert.JSONEq(t, `{"user_id": "Foo", "value": "bar", "foo":"bar"}`, string(content))
 				}
 
 				responseContentType = "application/json"
 				responseContent = []byte(`{ "baz": "foo" }`)
 				responseCode = http.StatusOK
 			},
-			configureContext: func(t *testing.T, ctx *heimdallmocks.ContextMock) {
+			configureContext: func(t *testing.T, ctx *heimdallmocks.RequestContextMock) {
 				t.Helper()
 
 				reqf := heimdallmocks.NewRequestFunctionsMock(t)
@@ -873,24 +920,26 @@ func TestGenericContextualizerExecute(t *testing.T) {
 					&heimdall.Request{
 						RequestFunctions: reqf,
 						Method:           http.MethodPost,
-						URL:              &url.URL{Scheme: "http", Host: "foobar.baz", Path: "zab"},
+						URL:              &heimdall.URL{URL: url.URL{Scheme: "http", Host: "foobar.baz", Path: "zab"}},
 					})
 			},
-			assert: func(t *testing.T, err error, sub *subject.Subject) {
+			assert: func(t *testing.T, err error, sub *subject.Subject, outputs map[string]any) {
 				t.Helper()
 
 				assert.True(t, remoteEndpointCalled)
 
 				require.NoError(t, err)
 
-				assert.Len(t, sub.Attributes, 2)
-				entry := sub.Attributes["test-contextualizer"]
+				assert.Len(t, sub.Attributes, 1)
+
+				assert.Len(t, outputs, 2)
+				entry := outputs["test-contextualizer"]
 				assert.Len(t, entry, 1)
 				assert.Contains(t, entry, "baz")
 			},
 		},
 	} {
-		t.Run("case="+tc.uc, func(t *testing.T) {
+		t.Run(uc, func(t *testing.T) {
 			// GIVEN
 			remoteEndpointCalled = false
 			responseContentType = ""
@@ -904,7 +953,7 @@ func TestGenericContextualizerExecute(t *testing.T) {
 
 			configureContext := x.IfThenElse(tc.configureContext != nil,
 				tc.configureContext,
-				func(t *testing.T, _ *heimdallmocks.ContextMock) { t.Helper() })
+				func(t *testing.T, _ *heimdallmocks.RequestContextMock) { t.Helper() })
 
 			configureCache := x.IfThenElse(tc.configureCache != nil,
 				tc.configureCache,
@@ -914,8 +963,9 @@ func TestGenericContextualizerExecute(t *testing.T) {
 
 			cch := mocks.NewCacheMock(t)
 
-			ctx := heimdallmocks.NewContextMock(t)
-			ctx.EXPECT().AppContext().Return(cache.WithContext(context.Background(), cch))
+			ctx := heimdallmocks.NewRequestContextMock(t)
+			ctx.EXPECT().Context().Return(cache.WithContext(t.Context(), cch))
+			ctx.EXPECT().Outputs().Return(map[string]any{"foo": "bar"})
 
 			configureContext(t, ctx)
 			configureCache(t, cch, tc.contextualizer, tc.subject)
@@ -925,7 +975,7 @@ func TestGenericContextualizerExecute(t *testing.T) {
 			err := tc.contextualizer.Execute(ctx, tc.subject)
 
 			// THEN
-			tc.assert(t, err, tc.subject)
+			tc.assert(t, err, tc.subject, ctx.Outputs())
 		})
 	}
 }

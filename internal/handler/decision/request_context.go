@@ -22,17 +22,15 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/dadrus/heimdall/internal/handler/requestcontext"
-	"github.com/dadrus/heimdall/internal/heimdall"
 	"github.com/dadrus/heimdall/internal/rules/rule"
 )
 
 func newContextFactory(
-	signer heimdall.JWTSigner,
 	responseCode int,
 ) requestcontext.ContextFactory {
 	return requestcontext.FactoryFunc(func(rw http.ResponseWriter, req *http.Request) requestcontext.Context {
 		return &requestContext{
-			RequestContext: requestcontext.New(signer, req),
+			RequestContext: requestcontext.New(req),
 			responseCode:   responseCode,
 			rw:             rw,
 		}
@@ -51,11 +49,13 @@ func (r *requestContext) Finalize(_ rule.Backend) error {
 		return err
 	}
 
-	zerolog.Ctx(r.AppContext()).Debug().Msg("Creating response")
+	zerolog.Ctx(r.Context()).Debug().Msg("Creating response")
 
 	uh := r.UpstreamHeaders()
-	for k := range uh {
-		r.rw.Header().Set(k, uh.Get(k))
+	for name, values := range uh {
+		for _, value := range values {
+			r.rw.Header().Add(name, value)
+		}
 	}
 
 	for k, v := range r.UpstreamCookies() {

@@ -1,8 +1,7 @@
-# syntax = docker/dockerfile:experimental
 # Builder image to build the app
 ARG USER=heimdall
 
-FROM --platform=$BUILDPLATFORM golang:1.22.2-bookworm@sha256:48b942a5a9803fafeb748f1a9c6edeb71e06653bb4df25f63f909151e15e9618 as builder
+FROM --platform=$BUILDPLATFORM golang:1.25.0-bookworm@sha256:74908ad827a5849c557eeca81d46263acf788ead606102d83466f499f83e35b1 AS builder
 ARG USER
 ARG TARGETARCH
 ARG VERSION="unknown"
@@ -18,7 +17,6 @@ RUN useradd -l -M -U -s "/usr/sbin/nologin" -d "/nonexistent" -u 10001 ${USER}
 WORKDIR /build
 
 COPY . .
-RUN go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.10.0
 RUN go mod download && go mod verify &&\
     CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-buildid= -w -s -X github.com/dadrus/heimdall/version.Version=${VERSION}"
 

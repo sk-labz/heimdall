@@ -1,4 +1,4 @@
-// Copyright 2023 Dimitrij Drus <dadrus@gmx.de>
+// Copyright 2022-2025 Dimitrij Drus <dadrus@gmx.de>
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,103 +17,103 @@
 package rules
 
 import (
+	"errors"
 	"testing"
 
-	"github.com/rs/zerolog/log"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	config2 "github.com/dadrus/heimdall/internal/config"
 	"github.com/dadrus/heimdall/internal/rules/config"
-	"github.com/dadrus/heimdall/internal/rules/event"
+	"github.com/dadrus/heimdall/internal/rules/rule"
 	"github.com/dadrus/heimdall/internal/rules/rule/mocks"
-	"github.com/dadrus/heimdall/internal/x"
-	"github.com/dadrus/heimdall/internal/x/testsupport"
 )
 
 func TestRuleSetProcessorOnCreated(t *testing.T) {
 	t.Parallel()
 
-	for _, tc := range []struct {
-		uc               string
-		ruleset          *config.RuleSet
-		configureFactory func(t *testing.T, mhf *mocks.FactoryMock)
-		assert           func(t *testing.T, err error, queue event.RuleSetChangedEventQueue)
+	for uc, tc := range map[string]struct {
+		ruleset   *config.RuleSet
+		configure func(t *testing.T, mhf *mocks.FactoryMock, repo *mocks.RepositoryMock)
+		assert    func(t *testing.T, err error)
 	}{
-		{
-			uc:      "unsupported version",
-			ruleset: &config.RuleSet{Version: "foo"},
-			assert: func(t *testing.T, err error, _ event.RuleSetChangedEventQueue) {
+		"unsupported version": {
+			ruleset:   &config.RuleSet{Version: "foo"},
+			configure: func(t *testing.T, _ *mocks.FactoryMock, _ *mocks.RepositoryMock) { t.Helper() },
+			assert: func(t *testing.T, err error) {
 				t.Helper()
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, ErrUnsupportedRuleSetVersion)
 			},
 		},
-		{
-			uc:      "error while loading rule set",
+		"error while loading rule set": {
 			ruleset: &config.RuleSet{Version: config.CurrentRuleSetVersion, Rules: []config.Rule{{ID: "foo"}}},
-			configureFactory: func(t *testing.T, mhf *mocks.FactoryMock) {
+			configure: func(t *testing.T, mhf *mocks.FactoryMock, _ *mocks.RepositoryMock) {
 				t.Helper()
 
-				mhf.EXPECT().CreateRule(mock.Anything, mock.Anything, mock.Anything).
-					Return(nil, testsupport.ErrTestPurpose)
+				mhf.EXPECT().CreateRule(mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.New("test error"))
 			},
-			assert: func(t *testing.T, err error, _ event.RuleSetChangedEventQueue) {
+			assert: func(t *testing.T, err error) {
 				t.Helper()
 
 				require.Error(t, err)
-				require.ErrorIs(t, err, testsupport.ErrTestPurpose)
-				assert.Contains(t, err.Error(), "failed loading")
+				require.ErrorContains(t, err, "loading rule ID='foo' failed")
 			},
 		},
-		{
-			uc: "successful",
+		"error while adding rule set": {
+			ruleset: &config.RuleSet{Version: config.CurrentRuleSetVersion, Rules: []config.Rule{{ID: "foo"}}},
+			configure: func(t *testing.T, mhf *mocks.FactoryMock, repo *mocks.RepositoryMock) {
+				t.Helper()
+
+				mhf.EXPECT().CreateRule(config.CurrentRuleSetVersion, mock.Anything, mock.Anything).Return(&mocks.RuleMock{}, nil)
+				repo.EXPECT().AddRuleSet(mock.Anything, mock.Anything, mock.Anything).Return(errors.New("test error"))
+			},
+			assert: func(t *testing.T, err error) {
+				t.Helper()
+
+				require.Error(t, err)
+				require.ErrorContains(t, err, "test error")
+			},
+		},
+		"successful": {
 			ruleset: &config.RuleSet{
 				MetaData: config.MetaData{Source: "test"},
 				Version:  config.CurrentRuleSetVersion,
 				Name:     "foobar",
 				Rules:    []config.Rule{{ID: "foo"}},
 			},
-			configureFactory: func(t *testing.T, mhf *mocks.FactoryMock) {
+			configure: func(t *testing.T, mhf *mocks.FactoryMock, repo *mocks.RepositoryMock) {
 				t.Helper()
 
-				mhf.EXPECT().CreateRule(config.CurrentRuleSetVersion, mock.Anything, mock.Anything).Return(&mocks.RuleMock{}, nil)
+				rul := &mocks.RuleMock{}
+
+				mhf.EXPECT().CreateRule(config.CurrentRuleSetVersion, mock.Anything, mock.Anything).Return(rul, nil)
+				repo.EXPECT().AddRuleSet(mock.Anything, "test", mock.MatchedBy(func(rules []rule.Rule) bool {
+					return len(rules) == 1 && rules[0] == rul
+				})).Return(nil)
 			},
-			assert: func(t *testing.T, err error, queue event.RuleSetChangedEventQueue) {
+			assert: func(t *testing.T, err error) {
 				t.Helper()
 
 				require.NoError(t, err)
-				require.Len(t, queue, 1)
-
-				evt := <-queue
-				require.Len(t, evt.Rules, 1)
-				assert.Equal(t, event.Create, evt.ChangeType)
-				assert.Equal(t, "test", evt.Source)
-				assert.Equal(t, "foobar", evt.Name)
-
-				assert.Equal(t, &mocks.RuleMock{}, evt.Rules[0])
 			},
 		},
 	} {
-		t.Run(tc.uc, func(t *testing.T) {
-			// GIVEM
-			configureFactory := x.IfThenElse(tc.configureFactory != nil,
-				tc.configureFactory,
-				func(t *testing.T, _ *mocks.FactoryMock) { t.Helper() })
-
-			queue := make(event.RuleSetChangedEventQueue, 10)
-
+		t.Run(uc, func(t *testing.T) {
+			// GIVEN
 			factory := mocks.NewFactoryMock(t)
-			configureFactory(t, factory)
+			repo := mocks.NewRepositoryMock(t)
 
-			processor := NewRuleSetProcessor(queue, factory, log.Logger)
+			tc.configure(t, factory, repo)
+
+			processor := NewRuleSetProcessor(repo, factory, config2.DecisionMode)
 
 			// WHEN
-			err := processor.OnCreated(tc.ruleset)
+			err := processor.OnCreated(t.Context(), tc.ruleset)
 
 			// THEN
-			tc.assert(t, err, queue)
+			tc.assert(t, err)
 		})
 	}
 }
@@ -121,87 +121,90 @@ func TestRuleSetProcessorOnCreated(t *testing.T) {
 func TestRuleSetProcessorOnUpdated(t *testing.T) {
 	t.Parallel()
 
-	for _, tc := range []struct {
-		uc               string
-		ruleset          *config.RuleSet
-		configureFactory func(t *testing.T, mhf *mocks.FactoryMock)
-		assert           func(t *testing.T, err error, queue event.RuleSetChangedEventQueue)
+	for uc, tc := range map[string]struct {
+		ruleset   *config.RuleSet
+		configure func(t *testing.T, mhf *mocks.FactoryMock, repo *mocks.RepositoryMock)
+		assert    func(t *testing.T, err error)
 	}{
-		{
-			uc:      "unsupported version",
+		"unsupported version": {
 			ruleset: &config.RuleSet{Version: "foo"},
-			assert: func(t *testing.T, err error, _ event.RuleSetChangedEventQueue) {
+			configure: func(t *testing.T, _ *mocks.FactoryMock, _ *mocks.RepositoryMock) {
+				t.Helper()
+			},
+			assert: func(t *testing.T, err error) {
 				t.Helper()
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, ErrUnsupportedRuleSetVersion)
 			},
 		},
-		{
-			uc:      "error while loading rule set",
+		"error while loading rule set": {
 			ruleset: &config.RuleSet{Version: config.CurrentRuleSetVersion, Rules: []config.Rule{{ID: "foo"}}},
-			configureFactory: func(t *testing.T, mhf *mocks.FactoryMock) {
+			configure: func(t *testing.T, mhf *mocks.FactoryMock, _ *mocks.RepositoryMock) {
 				t.Helper()
 
-				mhf.EXPECT().CreateRule(mock.Anything, mock.Anything, mock.Anything).
-					Return(nil, testsupport.ErrTestPurpose)
+				mhf.EXPECT().CreateRule(mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.New("test error"))
 			},
-			assert: func(t *testing.T, err error, _ event.RuleSetChangedEventQueue) {
+			assert: func(t *testing.T, err error) {
 				t.Helper()
 
 				require.Error(t, err)
-				require.ErrorIs(t, err, testsupport.ErrTestPurpose)
-				assert.Contains(t, err.Error(), "failed loading")
+				require.ErrorContains(t, err, "loading rule ID='foo' failed")
 			},
 		},
-		{
-			uc: "successful",
+		"error while updating rule set": {
+			ruleset: &config.RuleSet{Version: config.CurrentRuleSetVersion, Rules: []config.Rule{{ID: "foo"}}},
+			configure: func(t *testing.T, mhf *mocks.FactoryMock, repo *mocks.RepositoryMock) {
+				t.Helper()
+
+				mhf.EXPECT().CreateRule(mock.Anything, mock.Anything, mock.Anything).Return(&mocks.RuleMock{}, nil)
+				repo.EXPECT().UpdateRuleSet(mock.Anything, mock.Anything, mock.Anything).Return(errors.New("test error"))
+			},
+			assert: func(t *testing.T, err error) {
+				t.Helper()
+
+				require.Error(t, err)
+				require.ErrorContains(t, err, "test error")
+			},
+		},
+		"successful": {
 			ruleset: &config.RuleSet{
 				MetaData: config.MetaData{Source: "test"},
 				Version:  config.CurrentRuleSetVersion,
 				Name:     "foobar",
 				Rules:    []config.Rule{{ID: "foo"}},
 			},
-			configureFactory: func(t *testing.T, mhf *mocks.FactoryMock) {
+			configure: func(t *testing.T, mhf *mocks.FactoryMock, repo *mocks.RepositoryMock) {
 				t.Helper()
 
-				mhf.EXPECT().CreateRule(config.CurrentRuleSetVersion, mock.Anything, mock.Anything).
-					Return(&mocks.RuleMock{}, nil)
+				rul := &mocks.RuleMock{}
+
+				mhf.EXPECT().CreateRule(config.CurrentRuleSetVersion, mock.Anything, mock.Anything).Return(rul, nil)
+				repo.EXPECT().UpdateRuleSet(mock.Anything, "test", mock.MatchedBy(func(rules []rule.Rule) bool {
+					return len(rules) == 1 && rules[0] == rul
+				})).Return(nil)
 			},
-			assert: func(t *testing.T, err error, queue event.RuleSetChangedEventQueue) {
+			assert: func(t *testing.T, err error) {
 				t.Helper()
 
 				require.NoError(t, err)
-				require.Len(t, queue, 1)
-
-				evt := <-queue
-				require.Len(t, evt.Rules, 1)
-				assert.Equal(t, event.Update, evt.ChangeType)
-				assert.Equal(t, "test", evt.Source)
-				assert.Equal(t, "foobar", evt.Name)
-
-				assert.Equal(t, &mocks.RuleMock{}, evt.Rules[0])
 			},
 		},
 	} {
-		t.Run(tc.uc, func(t *testing.T) {
+		t.Run(uc, func(t *testing.T) {
 			// GIVEM
-			configureFactory := x.IfThenElse(tc.configureFactory != nil,
-				tc.configureFactory,
-				func(t *testing.T, _ *mocks.FactoryMock) { t.Helper() })
-
-			queue := make(event.RuleSetChangedEventQueue, 10)
-
 			factory := mocks.NewFactoryMock(t)
-			configureFactory(t, factory)
+			repo := mocks.NewRepositoryMock(t)
 
-			processor := NewRuleSetProcessor(queue, factory, log.Logger)
+			tc.configure(t, factory, repo)
+
+			processor := NewRuleSetProcessor(repo, factory, config2.ProxyMode)
 
 			// WHEN
-			err := processor.OnUpdated(tc.ruleset)
+			err := processor.OnUpdated(t.Context(), tc.ruleset)
 
 			// THEN
-			tc.assert(t, err, queue)
+			tc.assert(t, err)
 		})
 	}
 }
@@ -209,41 +212,59 @@ func TestRuleSetProcessorOnUpdated(t *testing.T) {
 func TestRuleSetProcessorOnDeleted(t *testing.T) {
 	t.Parallel()
 
-	for _, tc := range []struct {
-		uc      string
-		ruleset *config.RuleSet
-		assert  func(t *testing.T, err error, queue event.RuleSetChangedEventQueue)
+	for uc, tc := range map[string]struct {
+		ruleset   *config.RuleSet
+		configure func(t *testing.T, repo *mocks.RepositoryMock)
+		assert    func(t *testing.T, err error)
 	}{
-		{
-			uc: "successful",
+		"failed removing rule set": {
 			ruleset: &config.RuleSet{
 				MetaData: config.MetaData{Source: "test"},
 				Version:  config.CurrentRuleSetVersion,
 				Name:     "foobar",
 			},
-			assert: func(t *testing.T, err error, queue event.RuleSetChangedEventQueue) {
+			configure: func(t *testing.T, repo *mocks.RepositoryMock) {
+				t.Helper()
+
+				repo.EXPECT().DeleteRuleSet(t.Context(), "test").Return(errors.New("test error"))
+			},
+			assert: func(t *testing.T, err error) {
+				t.Helper()
+
+				require.Error(t, err)
+				require.ErrorContains(t, err, "test error")
+			},
+		},
+		"successful": {
+			ruleset: &config.RuleSet{
+				MetaData: config.MetaData{Source: "test"},
+				Version:  config.CurrentRuleSetVersion,
+				Name:     "foobar",
+			},
+			configure: func(t *testing.T, repo *mocks.RepositoryMock) {
+				t.Helper()
+
+				repo.EXPECT().DeleteRuleSet(t.Context(), "test").Return(nil)
+			},
+			assert: func(t *testing.T, err error) {
 				t.Helper()
 
 				require.NoError(t, err)
-				require.Len(t, queue, 1)
-
-				evt := <-queue
-				assert.Equal(t, event.Remove, evt.ChangeType)
-				assert.Equal(t, "test", evt.Source)
-				assert.Equal(t, "foobar", evt.Name)
 			},
 		},
 	} {
-		t.Run(tc.uc, func(t *testing.T) {
+		t.Run(uc, func(t *testing.T) {
 			// GIVEM
-			queue := make(event.RuleSetChangedEventQueue, 10)
-			processor := NewRuleSetProcessor(queue, mocks.NewFactoryMock(t), log.Logger)
+			repo := mocks.NewRepositoryMock(t)
+			tc.configure(t, repo)
+
+			processor := NewRuleSetProcessor(repo, mocks.NewFactoryMock(t), config2.DecisionMode)
 
 			// WHEN
-			err := processor.OnDeleted(tc.ruleset)
+			err := processor.OnDeleted(t.Context(), tc.ruleset)
 
 			// THEN
-			tc.assert(t, err, queue)
+			tc.assert(t, err)
 		})
 	}
 }

@@ -89,6 +89,7 @@ type Error struct {
 	errType ErrorType
 
 	Source string
+	StepID string
 }
 
 func (e Error) ConvertToNative(typeDesc reflect.Type) (any, error) {
@@ -113,7 +114,7 @@ func (e Error) ConvertToType(typeVal ref.Type) ref.Val {
 func (e Error) Equal(other ref.Val) ref.Val {
 	if otherErr, ok := other.(Error); ok {
 		// the values MUST be equal here
-		return types.Bool(e.errType.current == otherErr.errType.current) // nolint: errorlint,goerr113
+		return types.Bool(e.errType.current == otherErr.errType.current) // nolint: errorlint,err113
 	}
 
 	return types.False
@@ -125,17 +126,21 @@ func (e Error) Value() any { return e }
 
 func WrapError(err error) Error {
 	var (
-		handlerIdentifier interface{ ID() string }
-		source            string
+		pipelineStep interface {
+			Name() string
+			ID() string
+		}
+
+		source string
+		stepID string
 	)
 
-	if ok := errors.As(err, &handlerIdentifier); ok {
-		source = handlerIdentifier.ID()
-	} else {
-		source = ""
+	if ok := errors.As(err, &pipelineStep); ok {
+		source = pipelineStep.Name()
+		stepID = pipelineStep.ID()
 	}
 
-	return Error{errType: ErrorType{current: err}, Source: source}
+	return Error{errType: ErrorType{current: err}, Source: source, StepID: stepID}
 }
 
 func Errors() cel.EnvOption {

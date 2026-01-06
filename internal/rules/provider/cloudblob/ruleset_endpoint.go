@@ -29,22 +29,25 @@ import (
 	_ "gocloud.dev/blob/s3blob"    // to support aws s3 blobs
 	"gocloud.dev/gcerrors"
 
+	"github.com/dadrus/heimdall/internal/app"
 	"github.com/dadrus/heimdall/internal/heimdall"
 	"github.com/dadrus/heimdall/internal/rules/config"
 	"github.com/dadrus/heimdall/internal/x/errorchain"
 )
 
 type ruleSetEndpoint struct {
-	URL             *url.URL `mapstructure:"url"`
-	Prefix          string   `mapstructure:"prefix"`
-	RulesPathPrefix string   `mapstructure:"rule_path_match_prefix"`
+	URL    *url.URL `mapstructure:"url"`
+	Prefix string   `mapstructure:"prefix"`
 }
 
 func (e *ruleSetEndpoint) ID() string {
 	return fmt.Sprintf("%s/%s", e.URL, e.Prefix)
 }
 
-func (e *ruleSetEndpoint) FetchRuleSets(ctx context.Context) ([]*config.RuleSet, error) {
+func (e *ruleSetEndpoint) FetchRuleSets(
+	ctx context.Context,
+	app app.Context,
+) ([]*config.RuleSet, error) {
 	bucket, err := blob.OpenBucket(ctx, e.URL.String())
 	if err != nil {
 		return nil, errorchain.NewWithMessage(heimdall.ErrInternal, "failed to open bucket").
@@ -54,13 +57,17 @@ func (e *ruleSetEndpoint) FetchRuleSets(ctx context.Context) ([]*config.RuleSet,
 	defer bucket.Close()
 
 	if len(e.URL.Path) != 0 {
-		return e.readSingleBlob(ctx, bucket)
+		return e.readSingleBlob(ctx, bucket, app)
 	}
 
-	return e.readAllBlobs(ctx, bucket)
+	return e.readAllBlobs(ctx, bucket, app)
 }
 
-func (e *ruleSetEndpoint) readAllBlobs(ctx context.Context, bucket *blob.Bucket) ([]*config.RuleSet, error) {
+func (e *ruleSetEndpoint) readAllBlobs(
+	ctx context.Context,
+	bucket *blob.Bucket,
+	app app.Context,
+) ([]*config.RuleSet, error) {
 	var ruleSets []*config.RuleSet
 
 	it := bucket.List(&blob.ListOptions{Prefix: e.Prefix})
@@ -75,7 +82,7 @@ func (e *ruleSetEndpoint) readAllBlobs(ctx context.Context, bucket *blob.Bucket)
 			return nil, mapError(err, "failed iterate blobs")
 		}
 
-		ruleSet, err := e.readRuleSet(ctx, bucket, obj.Key)
+		ruleSet, err := e.readRuleSet(ctx, bucket, obj.Key, app)
 		if err != nil {
 			if errors.Is(err, config.ErrEmptyRuleSet) {
 				continue
@@ -90,8 +97,12 @@ func (e *ruleSetEndpoint) readAllBlobs(ctx context.Context, bucket *blob.Bucket)
 	return ruleSets, nil
 }
 
-func (e *ruleSetEndpoint) readSingleBlob(ctx context.Context, bucket *blob.Bucket) ([]*config.RuleSet, error) {
-	ruleSet, err := e.readRuleSet(ctx, bucket, e.URL.Path)
+func (e *ruleSetEndpoint) readSingleBlob(
+	ctx context.Context,
+	bucket *blob.Bucket,
+	app app.Context,
+) ([]*config.RuleSet, error) {
+	ruleSet, err := e.readRuleSet(ctx, bucket, e.URL.Path, app)
 	if err != nil {
 		if errors.Is(err, config.ErrEmptyRuleSet) {
 			return []*config.RuleSet{}, nil
@@ -103,7 +114,12 @@ func (e *ruleSetEndpoint) readSingleBlob(ctx context.Context, bucket *blob.Bucke
 	return []*config.RuleSet{ruleSet}, nil
 }
 
-func (e *ruleSetEndpoint) readRuleSet(ctx context.Context, bucket *blob.Bucket, key string) (
+func (e *ruleSetEndpoint) readRuleSet(
+	ctx context.Context,
+	bucket *blob.Bucket,
+	key string,
+	app app.Context,
+) (
 	*config.RuleSet, error,
 ) {
 	attrs, err := bucket.Attributes(ctx, key)
@@ -118,15 +134,11 @@ func (e *ruleSetEndpoint) readRuleSet(ctx context.Context, bucket *blob.Bucket, 
 
 	defer reader.Close()
 
-	contents, err := config.ParseRules(attrs.ContentType, reader, false)
+	contents, err := config.ParseRules(app, attrs.ContentType, reader, false)
 	if err != nil {
 		return nil, errorchain.
 			NewWithMessage(heimdall.ErrInternal, "failed to decode received rule set").
 			CausedBy(err)
-	}
-
-	if err = contents.VerifyPathPrefix(e.RulesPathPrefix); err != nil {
-		return nil, err
 	}
 
 	contents.Hash = attrs.MD5

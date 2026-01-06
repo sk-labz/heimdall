@@ -33,7 +33,7 @@ func TestRegistryEmptyStore(t *testing.T) {
 	r := registry[trace.SpanExporter]{}
 
 	// WHEN
-	err := r.store("first", func(_ context.Context) (trace.SpanExporter, error) { return nil, nil })
+	err := r.store("first", func(_ context.Context) (trace.SpanExporter, error) { return nil, errors.New("test error") })
 
 	// THEN
 	require.NoError(t, err)
@@ -44,10 +44,10 @@ func TestRegistryNonEmptyStore(t *testing.T) {
 
 	// GIVEN
 	r := registry[trace.SpanExporter]{}
-	require.NoError(t, r.store("first", func(_ context.Context) (trace.SpanExporter, error) { return nil, nil }))
+	require.NoError(t, r.store("first", func(_ context.Context) (trace.SpanExporter, error) { return nil, errors.New("test error") }))
 
 	// WHEN
-	err := r.store("second", func(_ context.Context) (trace.SpanExporter, error) { return nil, nil })
+	err := r.store("second", func(_ context.Context) (trace.SpanExporter, error) { return nil, errors.New("test error") })
 
 	// THEN
 	require.NoError(t, err)
@@ -58,15 +58,15 @@ func TestRegistryDuplicateStore(t *testing.T) {
 
 	// GIVEN
 	r := registry[trace.SpanExporter]{}
-	require.NoError(t, r.store("first", func(_ context.Context) (trace.SpanExporter, error) { return nil, nil }))
+	require.NoError(t, r.store("first", func(_ context.Context) (trace.SpanExporter, error) { return nil, errors.New("test error") }))
 
 	// WHEN
-	err := r.store("first", func(_ context.Context) (trace.SpanExporter, error) { return nil, nil })
+	err := r.store("first", func(_ context.Context) (trace.SpanExporter, error) { return nil, errors.New("test error") })
 
 	// THEN
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrDuplicateRegistration)
-	assert.Contains(t, err.Error(), "first")
+	require.ErrorContains(t, err, "first")
 }
 
 func TestRegistryEmptyLoad(t *testing.T) {
@@ -99,6 +99,6 @@ func TestRegistryExistentLoad(t *testing.T) {
 	assert.True(t, ok, "registry should hold expected factory")
 	assert.NotNil(t, value)
 
-	_, err := value(context.Background())
-	assert.Contains(t, err.Error(), "for test purpose")
+	_, err := value(t.Context())
+	require.ErrorContains(t, err, "for test purpose")
 }

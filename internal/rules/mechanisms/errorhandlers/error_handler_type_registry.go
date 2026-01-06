@@ -20,19 +20,20 @@ import (
 	"errors"
 	"sync"
 
+	"github.com/dadrus/heimdall/internal/app"
 	"github.com/dadrus/heimdall/internal/x/errorchain"
 )
 
 var (
 	ErrUnsupportedErrorHandlerType = errors.New("error handler type unsupported")
 
-	errorHandlerTypeFactories   []ErrorHandlerTypeFactory // nolint: gochecknoglobals
-	errorHandlerTypeFactoriesMu sync.RWMutex              // nolint: gochecknoglobals
+	errorHandlerTypeFactories   []TypeFactory // nolint: gochecknoglobals
+	errorHandlerTypeFactoriesMu sync.RWMutex  // nolint: gochecknoglobals
 )
 
-type ErrorHandlerTypeFactory func(id string, typ string, c map[string]any) (bool, ErrorHandler, error)
+type TypeFactory func(app app.Context, id string, typ string, c map[string]any) (bool, ErrorHandler, error)
 
-func registerTypeFactory(factory ErrorHandlerTypeFactory) {
+func registerTypeFactory(factory TypeFactory) {
 	errorHandlerTypeFactoriesMu.Lock()
 	defer errorHandlerTypeFactoriesMu.Unlock()
 
@@ -43,12 +44,12 @@ func registerTypeFactory(factory ErrorHandlerTypeFactory) {
 	errorHandlerTypeFactories = append(errorHandlerTypeFactories, factory)
 }
 
-func CreatePrototype(id string, typ string, config map[string]any) (ErrorHandler, error) {
+func CreatePrototype(app app.Context, id string, typ string, config map[string]any) (ErrorHandler, error) {
 	errorHandlerTypeFactoriesMu.RLock()
 	defer errorHandlerTypeFactoriesMu.RUnlock()
 
 	for _, create := range errorHandlerTypeFactories {
-		if ok, at, err := create(id, typ, config); ok {
+		if ok, at, err := create(app, id, typ, config); ok {
 			return at, err
 		}
 	}

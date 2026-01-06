@@ -17,12 +17,13 @@
 package authenticators
 
 import (
-	"context"
 	"testing"
 
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/dadrus/heimdall/internal/app"
 	"github.com/dadrus/heimdall/internal/heimdall"
 	"github.com/dadrus/heimdall/internal/heimdall/mocks"
 )
@@ -30,12 +31,18 @@ import (
 func TestUnauthorizedAuthenticatorExecution(t *testing.T) {
 	t.Parallel()
 	// GIVEN
-	var identifier interface{ ID() string }
+	appCtx := app.NewContextMock(t)
+	appCtx.EXPECT().Logger().Return(log.Logger)
 
-	ctx := mocks.NewContextMock(t)
-	ctx.EXPECT().AppContext().Return(context.Background())
+	var identifier interface {
+		ID() string
+		Name() string
+	}
 
-	auth := newUnauthorizedAuthenticator("unauth")
+	ctx := mocks.NewRequestContextMock(t)
+	ctx.EXPECT().Context().Return(t.Context())
+
+	auth := newUnauthorizedAuthenticator(appCtx, "unauth")
 
 	// WHEN
 	sub, err := auth.Execute(ctx)
@@ -47,37 +54,73 @@ func TestUnauthorizedAuthenticatorExecution(t *testing.T) {
 
 	require.ErrorAs(t, err, &identifier)
 	assert.Equal(t, "unauth", identifier.ID())
+	assert.Equal(t, identifier.Name(), identifier.ID())
 }
 
 func TestCreateUnauthorizedAuthenticatorFromPrototype(t *testing.T) {
 	t.Parallel()
-	// GIVEN
-	prototype := newUnauthorizedAuthenticator("unauth")
 
-	// WHEN
-	auth, err := prototype.WithConfig(nil)
+	for uc, tc := range map[string]struct {
+		stepID  string
+		newConf map[string]any
+		assert  func(t *testing.T, err error, prototype *unauthorizedAuthenticator, configured *unauthorizedAuthenticator)
+	}{
+		"without new config and step ID": {
+			assert: func(t *testing.T, err error, prototype *unauthorizedAuthenticator, configured *unauthorizedAuthenticator) {
+				t.Helper()
 
-	// THEN
-	require.NoError(t, err)
+				require.NoError(t, err)
+				assert.Equal(t, prototype, configured)
+			},
+		},
+		"with new config": {
+			newConf: map[string]any{"foo": "bar"},
+			assert: func(t *testing.T, err error, _ *unauthorizedAuthenticator, _ *unauthorizedAuthenticator) {
+				t.Helper()
 
-	uaa, ok := auth.(*unauthorizedAuthenticator)
-	require.True(t, ok)
+				require.Error(t, err)
+				require.ErrorIs(t, err, heimdall.ErrConfiguration)
+				require.ErrorContains(t, err, "cannot be reconfigured")
+			},
+		},
+		"with new step ID": {
+			stepID: "foo",
+			assert: func(t *testing.T, err error, prototype *unauthorizedAuthenticator, configured *unauthorizedAuthenticator) {
+				t.Helper()
 
-	// prototype and "created" authenticator are same
-	assert.Equal(t, prototype, uaa)
-	assert.Equal(t, "unauth", uaa.ID())
+				require.NoError(t, err)
+				assert.NotEqual(t, prototype, configured)
+				assert.Equal(t, prototype.Name(), configured.Name())
+				assert.Equal(t, "foo", configured.ID())
+				assert.Equal(t, "with new step ID", prototype.ID())
+			},
+		},
+	} {
+		t.Run(uc, func(t *testing.T) {
+			// GIVEN
+			appCtx := app.NewContextMock(t)
+			appCtx.EXPECT().Logger().Return(log.Logger)
+
+			prototype := newUnauthorizedAuthenticator(appCtx, uc)
+
+			auth, err := prototype.WithConfig(tc.stepID, tc.newConf)
+
+			uaa, ok := auth.(*unauthorizedAuthenticator)
+			if err == nil {
+				require.True(t, ok)
+			}
+
+			tc.assert(t, err, prototype, uaa)
+		})
+	}
 }
 
-func TestUnauthorizedAuthenticatorIsFallbackOnErrorAllowed(t *testing.T) {
+func TestUnauthorizedAuthenticatorIsInsecure(t *testing.T) {
 	t.Parallel()
 
 	// GIVEN
-	auth := newUnauthorizedAuthenticator("unauth")
+	auth := unauthorizedAuthenticator{}
 
-	// WHEN
-	isAllowed := auth.IsFallbackOnErrorAllowed()
-
-	// THEN
-	require.False(t, isAllowed)
-	require.Equal(t, "unauth", auth.ID())
+	// WHEN & THEN
+	require.False(t, auth.IsInsecure())
 }

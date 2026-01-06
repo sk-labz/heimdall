@@ -17,7 +17,6 @@
 package grpcv3
 
 import (
-	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -31,7 +30,6 @@ import (
 	"google.golang.org/grpc/metadata"
 
 	"github.com/dadrus/heimdall/internal/heimdall"
-	"github.com/dadrus/heimdall/internal/heimdall/mocks"
 )
 
 func TestNewRequestContext(t *testing.T) {
@@ -65,11 +63,10 @@ func TestNewRequestContext(t *testing.T) {
 
 	ctx := NewRequestContext(
 		metadata.NewIncomingContext(
-			context.Background(),
+			t.Context(),
 			md,
 		),
 		checkReq,
-		mocks.NewJWTSignerMock(t),
 	)
 
 	// THEN
@@ -86,8 +83,7 @@ func TestNewRequestContext(t *testing.T) {
 	require.Equal(t, "foo", ctx.Request().Cookie("bar"))
 	require.Equal(t, "baz", ctx.Request().Cookie("foo"))
 	require.Empty(t, ctx.Request().Cookie("baz"))
-	require.NotNil(t, ctx.AppContext())
-	require.NotNil(t, ctx.Signer())
+	require.NotNil(t, ctx.Context())
 	assert.Equal(t, []string{"127.0.0.1", "192.168.1.1"}, ctx.Request().ClientIPAddresses)
 }
 
@@ -104,14 +100,12 @@ func TestFinalizeRequestContext(t *testing.T) {
 		return nil
 	}
 
-	for _, tc := range []struct {
-		uc            string
-		updateContext func(t *testing.T, ctx heimdall.Context)
+	for uc, tc := range map[string]struct {
+		updateContext func(t *testing.T, ctx heimdall.RequestContext)
 		assert        func(t *testing.T, err error, response *envoy_auth.CheckResponse)
 	}{
-		{
-			uc: "successful with some header",
-			updateContext: func(t *testing.T, ctx heimdall.Context) {
+		"successful with some different header": {
+			updateContext: func(t *testing.T, ctx heimdall.RequestContext) {
 				t.Helper()
 
 				ctx.AddHeaderForUpstream("x-for-upstream-1", "some-value-1")
@@ -139,9 +133,34 @@ func TestFinalizeRequestContext(t *testing.T) {
 				assert.Equal(t, "some-value-2", header.GetValue())
 			},
 		},
-		{
-			uc: "successful with some cookies",
-			updateContext: func(t *testing.T, ctx heimdall.Context) {
+		"successful with multiple header with same name but different values": {
+			updateContext: func(t *testing.T, ctx heimdall.RequestContext) {
+				t.Helper()
+
+				ctx.AddHeaderForUpstream("x-for-upstream-1", "some-value-1")
+				ctx.AddHeaderForUpstream("x-for-upstream-1", "some-value-2")
+				ctx.AddHeaderForUpstream("x-for-upstream-1", "some-value-3")
+			},
+			assert: func(t *testing.T, err error, response *envoy_auth.CheckResponse) {
+				t.Helper()
+
+				require.NoError(t, err)
+				require.NotNil(t, response)
+
+				assert.Equal(t, int32(codes.OK), response.GetStatus().GetCode())
+
+				okResponse := response.GetOkResponse()
+				require.NotNil(t, okResponse)
+
+				require.Len(t, okResponse.GetHeaders(), 1)
+
+				header := findHeader(okResponse.GetHeaders(), "X-For-Upstream-1")
+				require.NotNil(t, header)
+				assert.Equal(t, "some-value-1,some-value-2,some-value-3", header.GetValue())
+			},
+		},
+		"successful with some cookies": {
+			updateContext: func(t *testing.T, ctx heimdall.RequestContext) {
 				t.Helper()
 
 				ctx.AddCookieForUpstream("some-cookie", "value-1")
@@ -166,9 +185,8 @@ func TestFinalizeRequestContext(t *testing.T) {
 				assert.Contains(t, okResponse.GetHeaders()[0].GetHeader().GetValue(), "some-other-cookie=value-2")
 			},
 		},
-		{
-			uc: "successful with header and cookie",
-			updateContext: func(t *testing.T, ctx heimdall.Context) {
+		"successful with multiple header and cookie": {
+			updateContext: func(t *testing.T, ctx heimdall.RequestContext) {
 				t.Helper()
 
 				ctx.AddHeaderForUpstream("x-for-upstream", "some-value")
@@ -194,9 +212,8 @@ func TestFinalizeRequestContext(t *testing.T) {
 				assert.Equal(t, "some-cookie=value-1", header.GetValue())
 			},
 		},
-		{
-			uc: "erroneous with header and cookie",
-			updateContext: func(t *testing.T, ctx heimdall.Context) {
+		"erroneous with header and cookie": {
+			updateContext: func(t *testing.T, ctx heimdall.RequestContext) {
 				t.Helper()
 
 				ctx.SetPipelineError(errors.New("test error"))
@@ -213,7 +230,7 @@ func TestFinalizeRequestContext(t *testing.T) {
 			},
 		},
 	} {
-		t.Run(tc.uc, func(t *testing.T) {
+		t.Run(uc, func(t *testing.T) {
 			// GIVEN
 			httpReq := &envoy_auth.AttributeContext_HttpRequest{
 				Method:   http.MethodPatch,
@@ -237,7 +254,7 @@ func TestFinalizeRequestContext(t *testing.T) {
 					},
 				},
 			}
-			ctx := NewRequestContext(context.Background(), checkReq, nil)
+			ctx := NewRequestContext(t.Context(), checkReq)
 
 			tc.updateContext(t, ctx)
 
@@ -253,59 +270,51 @@ func TestFinalizeRequestContext(t *testing.T) {
 func TestRequestContextBody(t *testing.T) {
 	t.Parallel()
 
-	for _, tc := range []struct {
-		uc     string
+	for uc, tc := range map[string]struct {
 		ct     string
 		body   []byte
 		expect any
 	}{
-		{
-			uc:     "No body",
+		"No body": {
 			ct:     "empty",
 			body:   nil,
 			expect: "",
 		},
-		{
-			uc:     "No body",
+		"Empty body": {
 			ct:     "empty",
 			body:   []byte(""),
 			expect: "",
 		},
-		{
-			uc:     "Wrong content type",
+		"Wrong content type": {
 			ct:     "application/json",
 			body:   []byte("foo: bar"),
 			expect: "foo: bar",
 		},
-		{
-			uc:     "x-www-form-urlencoded encoded",
+		"x-www-form-urlencoded encoded": {
 			ct:     "application/x-www-form-urlencoded; charset=utf-8",
 			body:   []byte("content=heimdall"),
 			expect: map[string]any{"content": []string{"heimdall"}},
 		},
-		{
-			uc:     "json encoded",
+		"json encoded": {
 			ct:     "application/json; charset=utf-8",
 			body:   []byte(`{ "content": "heimdall" }`),
 			expect: map[string]any{"content": "heimdall"},
 		},
-		{
-			uc:     "yaml encoded",
+		"yaml encoded": {
 			ct:     "application/yaml; charset=utf-8",
 			body:   []byte("content: heimdall"),
 			expect: map[string]any{"content": "heimdall"},
 		},
-		{
-			uc:     "plain text",
+		"plain text": {
 			ct:     "text/plain",
 			body:   []byte("content=heimdall"),
 			expect: "content=heimdall",
 		},
 	} {
-		t.Run(tc.uc, func(t *testing.T) {
+		t.Run(uc, func(t *testing.T) {
 			// GIVEN
 			ctx := NewRequestContext(
-				context.Background(),
+				t.Context(),
 				&envoy_auth.CheckRequest{
 					Attributes: &envoy_auth.AttributeContext{
 						Request: &envoy_auth.AttributeContext_Request{
@@ -315,7 +324,6 @@ func TestRequestContextBody(t *testing.T) {
 						},
 					},
 				},
-				nil,
 			)
 
 			// WHEN

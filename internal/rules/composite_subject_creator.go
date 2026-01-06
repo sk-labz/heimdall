@@ -17,19 +17,20 @@
 package rules
 
 import (
-	"errors"
+	"strings"
 
 	"github.com/rs/zerolog"
 
 	"github.com/dadrus/heimdall/internal/accesscontext"
 	"github.com/dadrus/heimdall/internal/heimdall"
 	"github.com/dadrus/heimdall/internal/rules/mechanisms/subject"
+	"github.com/dadrus/heimdall/internal/x/errorchain"
 )
 
 type compositeSubjectCreator []subjectCreator
 
-func (ca compositeSubjectCreator) Execute(ctx heimdall.Context) (*subject.Subject, error) {
-	logger := zerolog.Ctx(ctx.AppContext())
+func (ca compositeSubjectCreator) Execute(ctx heimdall.RequestContext) (*subject.Subject, error) {
+	logger := zerolog.Ctx(ctx.Context())
 
 	var (
 		sub *subject.Subject
@@ -39,9 +40,15 @@ func (ca compositeSubjectCreator) Execute(ctx heimdall.Context) (*subject.Subjec
 	for idx, a := range ca {
 		sub, err = a.Execute(ctx)
 		if err != nil {
-			logger.Info().Err(err).Msg("Pipeline step execution failed")
+			logger.Warn().Err(err).Msg("Pipeline step execution failed")
 
-			if (errors.Is(err, heimdall.ErrArgument) || a.IsFallbackOnErrorAllowed()) && idx < len(ca) {
+			if strings.Contains(err.Error(), "tls:") {
+				err = errorchain.New(heimdall.ErrInternal).CausedBy(err)
+
+				break
+			}
+
+			if idx < len(ca)-1 {
 				logger.Info().Msg("Falling back to next configured one.")
 
 				continue
@@ -50,7 +57,7 @@ func (ca compositeSubjectCreator) Execute(ctx heimdall.Context) (*subject.Subjec
 			break
 		}
 
-		accesscontext.SetSubject(ctx.AppContext(), sub.ID)
+		accesscontext.SetSubject(ctx.Context(), sub.ID)
 
 		return sub, nil
 	}

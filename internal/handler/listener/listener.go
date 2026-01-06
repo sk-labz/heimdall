@@ -17,12 +17,14 @@
 package listener
 
 import (
+	"context"
 	"crypto/tls"
 	"net"
 	"sync/atomic"
 	"time"
 
 	"github.com/dadrus/heimdall/internal/config"
+	"github.com/dadrus/heimdall/internal/otel/metrics/certificate"
 	"github.com/dadrus/heimdall/internal/watcher"
 	"github.com/dadrus/heimdall/internal/x/tlsx"
 )
@@ -44,12 +46,14 @@ func (c *conn) Write(data []byte) (int, error) {
 		}
 	}
 
-	n, err := c.Conn.Write(data)
+	bytesWritten, err := c.Conn.Write(data)
 	if c.resetDeadline.Load() {
-		c.bytesWritten.Add(int32(n))
+		//nolint:gosec
+		// no integer overflow during conversion possible
+		c.bytesWritten.Add(int32(bytesWritten))
 	}
 
-	return n, err
+	return bytesWritten, err
 }
 
 func (c *conn) SetDeadline(deadline time.Time) error {
@@ -89,8 +93,16 @@ func (l *listener) Accept() (net.Conn, error) {
 	return &conn{Conn: con}, nil
 }
 
-func New(network, address string, tlsConf *config.TLS, cw watcher.Watcher) (net.Listener, error) {
-	listnr, err := net.Listen(network, address)
+func New(
+	ctx context.Context,
+	name, address string,
+	tlsConf *config.TLS,
+	cw watcher.Watcher,
+	co certificate.Observer,
+) (net.Listener, error) {
+	var lc net.ListenConfig
+
+	listnr, err := lc.Listen(ctx, "tcp", address)
 	if err != nil {
 		return nil, err
 	}
@@ -98,16 +110,23 @@ func New(network, address string, tlsConf *config.TLS, cw watcher.Watcher) (net.
 	listnr = &listener{Listener: listnr}
 
 	if tlsConf != nil {
-		return newTLSListener(tlsConf, listnr, cw)
+		return newTLSListener(name, tlsConf, listnr, cw, co)
 	}
 
 	return listnr, nil
 }
 
-func newTLSListener(tlsConf *config.TLS, listener net.Listener, cw watcher.Watcher) (net.Listener, error) {
+func newTLSListener(
+	name string,
+	tlsConf *config.TLS,
+	listener net.Listener,
+	cw watcher.Watcher,
+	co certificate.Observer,
+) (net.Listener, error) {
 	cfg, err := tlsx.ToTLSConfig(tlsConf,
 		tlsx.WithServerAuthentication(true),
 		tlsx.WithSecretsWatcher(cw),
+		tlsx.WithCertificateObserver(name, co),
 	)
 	if err != nil {
 		return nil, err

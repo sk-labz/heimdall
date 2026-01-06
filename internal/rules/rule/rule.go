@@ -17,17 +17,14 @@
 package rule
 
 import (
-	"net/url"
-
 	"github.com/dadrus/heimdall/internal/heimdall"
 )
-
-//go:generate mockery --name Rule --structname RuleMock
 
 type Rule interface {
 	ID() string
 	SrcID() string
-	Execute(ctx heimdall.Context) (Backend, error)
-	MatchesURL(match *url.URL) bool
-	MatchesMethod(method string) bool
+	Execute(ctx heimdall.RequestContext) (Backend, error)
+	Routes() []Route
+	SameAs(other Rule) bool
+	EqualTo(other Rule) bool
 }

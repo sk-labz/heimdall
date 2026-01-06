@@ -19,15 +19,12 @@ package grpcv3
 import (
 	"context"
 
-	"github.com/rs/zerolog"
 	"go.uber.org/fx"
 
+	"github.com/dadrus/heimdall/internal/app"
 	"github.com/dadrus/heimdall/internal/cache"
-	"github.com/dadrus/heimdall/internal/config"
 	"github.com/dadrus/heimdall/internal/handler/fxlcm"
-	"github.com/dadrus/heimdall/internal/heimdall"
 	"github.com/dadrus/heimdall/internal/rules/rule"
-	"github.com/dadrus/heimdall/internal/watcher"
 )
 
 var Module = fx.Invoke( // nolint: gochecknoglobals
@@ -38,24 +35,19 @@ var Module = fx.Invoke( // nolint: gochecknoglobals
 	),
 )
 
-func newLifecycleManager(
-	conf *config.Configuration,
-	logger zerolog.Logger,
-	exec rule.Executor,
-	signer heimdall.JWTSigner,
-	cch cache.Cache,
-	cw watcher.Watcher,
-) *fxlcm.LifecycleManager {
-	cfg := conf.Serve.Decision
+func newLifecycleManager(app app.Context, exec rule.Executor, cch cache.Cache) *fxlcm.LifecycleManager {
+	conf := app.Config()
+	logger := app.Logger()
+	cfg := conf.Serve
 
 	return &fxlcm.LifecycleManager{
 		ServiceName:    "Decision Envoy ExtAuth",
 		ServiceAddress: cfg.Address(),
 		Server: &adapter{
-			s: newService(conf, cch, logger, exec, signer),
+			s: newService(conf, cch, logger, exec),
 		},
 		Logger:      logger,
 		TLSConf:     cfg.TLS,
-		FileWatcher: cw,
+		FileWatcher: app.Watcher(),
 	}
 }

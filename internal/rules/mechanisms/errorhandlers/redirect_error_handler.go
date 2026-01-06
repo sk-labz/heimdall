@@ -18,9 +18,11 @@ package errorhandlers
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/rs/zerolog"
 
+	"github.com/dadrus/heimdall/internal/app"
 	"github.com/dadrus/heimdall/internal/heimdall"
 	"github.com/dadrus/heimdall/internal/rules/mechanisms/template"
 	"github.com/dadrus/heimdall/internal/x"
@@ -32,51 +34,67 @@ import (
 //nolint:gochecknoinits
 func init() {
 	registerTypeFactory(
-		func(id string, typ string, conf map[string]any) (bool, ErrorHandler, error) {
+		func(app app.Context, name string, typ string, conf map[string]any) (bool, ErrorHandler, error) {
 			if typ != ErrorHandlerRedirect {
 				return false, nil, nil
 			}
 
-			eh, err := newRedirectErrorHandler(id, conf)
+			eh, err := newRedirectErrorHandler(app, name, conf)
 
 			return true, eh, err
 		})
 }
 
 type redirectErrorHandler struct {
-	*baseErrorHandler
-
+	name string
+	id   string
 	to   template.Template
 	code int
 }
 
-func newRedirectErrorHandler(id string, rawConfig map[string]any) (*redirectErrorHandler, error) {
+func newRedirectErrorHandler(app app.Context, name string, rawConfig map[string]any) (*redirectErrorHandler, error) {
+	logger := app.Logger()
+	logger.Info().
+		Str("_type", ErrorHandlerRedirect).
+		Str("_name", name).
+		Msg("Creating error handler")
+
 	type Config struct {
-		Condition string            `mapstructure:"if"   validate:"required"`
-		To        template.Template `mapstructure:"to"   validate:"required"`
-		Code      int               `mapstructure:"code"`
+		To   template.Template `mapstructure:"to"   validate:"required,enforced=istls"`
+		Code int               `mapstructure:"code"`
 	}
 
 	var conf Config
-	if err := decodeConfig(ErrorHandlerRedirect, rawConfig, &conf); err != nil {
+	if err := decodeConfig(app.Validator(), ErrorHandlerRedirect, rawConfig, &conf); err != nil {
 		return nil, err
 	}
 
-	base, err := newBaseErrorHandler(id, conf.Condition)
-	if err != nil {
-		return nil, err
+	if strings.HasPrefix(conf.To.String(), "http://") {
+		logger.Warn().
+			Str("_type", ErrorHandlerRedirect).
+			Str("_name", name).
+			Msg("No TLS configured for the endpoint used in error handler")
 	}
 
 	return &redirectErrorHandler{
-		baseErrorHandler: base,
-		to:               conf.To,
-		code:             x.IfThenElse(conf.Code != 0, conf.Code, http.StatusFound),
+		name: name,
+		id:   name,
+		to:   conf.To,
+		code: x.IfThenElse(conf.Code != 0, conf.Code, http.StatusFound),
 	}, nil
 }
 
-func (eh *redirectErrorHandler) Execute(ctx heimdall.Context, _ error) error {
-	logger := zerolog.Ctx(ctx.AppContext())
-	logger.Debug().Str("_id", eh.id).Msg("Handling error using redirect error handler")
+func (eh *redirectErrorHandler) Name() string { return eh.name }
+
+func (eh *redirectErrorHandler) ID() string { return eh.id }
+
+func (eh *redirectErrorHandler) Execute(ctx heimdall.RequestContext, _ error) error {
+	logger := zerolog.Ctx(ctx.Context())
+	logger.Debug().
+		Str("_type", ErrorHandlerRedirect).
+		Str("_name", eh.name).
+		Str("_id", eh.id).
+		Msg("Executing error handler")
 
 	toURL, err := eh.to.Render(map[string]any{
 		"Request": ctx.Request(),
@@ -95,28 +113,18 @@ func (eh *redirectErrorHandler) Execute(ctx heimdall.Context, _ error) error {
 	return nil
 }
 
-func (eh *redirectErrorHandler) WithConfig(rawConfig map[string]any) (ErrorHandler, error) {
-	if len(rawConfig) == 0 {
+func (eh *redirectErrorHandler) WithConfig(stepID string, rawConfig map[string]any) (ErrorHandler, error) {
+	if len(stepID) == 0 && len(rawConfig) == 0 {
 		return eh, nil
 	}
 
-	type Config struct {
-		Condition string `mapstructure:"if" validate:"required"`
+	if len(rawConfig) == 0 {
+		erh := *eh
+		erh.id = stepID
+
+		return &erh, nil
 	}
 
-	var conf Config
-	if err := decodeConfig(ErrorHandlerRedirect, rawConfig, &conf); err != nil {
-		return nil, err
-	}
-
-	base, err := newBaseErrorHandler(eh.id, conf.Condition)
-	if err != nil {
-		return nil, err
-	}
-
-	return &redirectErrorHandler{
-		baseErrorHandler: base,
-		to:               eh.to,
-		code:             eh.code,
-	}, nil
+	return nil, errorchain.NewWithMessage(heimdall.ErrConfiguration,
+		"reconfiguration of a redirect error handler is not supported")
 }

@@ -33,13 +33,11 @@ func TestAudienceUnmarshalJSON(t *testing.T) {
 		Audience Audience `json:"aud,omitempty"`
 	}
 
-	for _, tc := range []struct {
-		uc     string
+	for uc, tc := range map[string]struct {
 		json   []byte
 		assert func(t *testing.T, err error, audience Audience)
 	}{
-		{
-			uc:   "audience encoded as string",
+		"audience encoded as string": {
 			json: []byte(`{ "aud": "foo bar baz" }`),
 			assert: func(t *testing.T, err error, audience Audience) {
 				t.Helper()
@@ -52,8 +50,7 @@ func TestAudienceUnmarshalJSON(t *testing.T) {
 				assert.Contains(t, audience, "baz")
 			},
 		},
-		{
-			uc:   "audience encoded as json array",
+		"audience encoded as json array": {
 			json: []byte(`{ "aud": ["foo", "bar", "baz"] }`),
 			assert: func(t *testing.T, err error, audience Audience) {
 				t.Helper()
@@ -66,8 +63,7 @@ func TestAudienceUnmarshalJSON(t *testing.T) {
 				assert.Contains(t, audience, "baz")
 			},
 		},
-		{
-			uc:   "bad audience encoding (not a json object)",
+		"bad audience encoding (not a json object)": {
 			json: []byte(`"aud": ["foo", "bar", "baz"]`),
 			assert: func(t *testing.T, err error, _ Audience) {
 				t.Helper()
@@ -75,30 +71,28 @@ func TestAudienceUnmarshalJSON(t *testing.T) {
 				require.Error(t, err)
 			},
 		},
-		{
-			uc:   "bad audience encoding (not expected content)",
+		"bad audience encoding (not expected content)": {
 			json: []byte(`{ "aud": true }`),
 			assert: func(t *testing.T, err error, _ Audience) {
 				t.Helper()
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrConfiguration)
-				assert.Contains(t, err.Error(), "unexpected content")
+				require.ErrorContains(t, err, "unexpected content")
 			},
 		},
-		{
-			uc:   "bad audience encoding (not expected json array content)",
+		"bad audience encoding (not expected json array content)": {
 			json: []byte(`{ "aud": [true] }`),
 			assert: func(t *testing.T, err error, _ Audience) {
 				t.Helper()
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrConfiguration)
-				assert.Contains(t, err.Error(), "audience array")
+				require.ErrorContains(t, err, "audience array")
 			},
 		},
 	} {
-		t.Run("case="+tc.uc, func(t *testing.T) {
+		t.Run(uc, func(t *testing.T) {
 			// GIVEN
 			var typ Typ
 

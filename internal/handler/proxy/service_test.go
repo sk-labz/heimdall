@@ -17,7 +17,6 @@
 package proxy
 
 import (
-	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -97,9 +96,8 @@ func TestProxyService(t *testing.T) {
 	_, err = pemFile.Write(pemBytes)
 	require.NoError(t, err)
 
-	for _, tc := range []struct {
-		uc             string
-		serviceConf    config.ServiceConfig
+	for uc, tc := range map[string]struct {
+		serviceConf    config.ServeConfig
 		enableMetrics  bool
 		disableHTTP2   bool
 		createRequest  func(t *testing.T, host string) *http.Request
@@ -108,13 +106,12 @@ func TestProxyService(t *testing.T) {
 		processRequest func(t *testing.T, rw http.ResponseWriter, req *http.Request)
 		assertResponse func(t *testing.T, err error, upstreamCalled bool, resp *http.Response)
 	}{
-		{
-			uc: "no rules configured",
+		"no rules configured": {
 			createRequest: func(t *testing.T, host string) *http.Request {
 				t.Helper()
 
 				req, err := http.NewRequestWithContext(
-					context.TODO(),
+					t.Context(),
 					http.MethodGet,
 					fmt.Sprintf("http://%s/foobar", host),
 					nil,
@@ -141,13 +138,12 @@ func TestProxyService(t *testing.T) {
 				assert.Empty(t, data)
 			},
 		},
-		{
-			uc: "rule doesn't match method",
+		"rule doesn't match method": {
 			createRequest: func(t *testing.T, host string) *http.Request {
 				t.Helper()
 
 				req, err := http.NewRequestWithContext(
-					context.TODO(),
+					t.Context(),
 					http.MethodPost,
 					fmt.Sprintf("http://%s/foobar", host),
 					nil,
@@ -159,7 +155,7 @@ func TestProxyService(t *testing.T) {
 			configureMocks: func(t *testing.T, exec *mocks4.ExecutorMock, _ *url.URL) {
 				t.Helper()
 
-				exec.EXPECT().Execute(mock.Anything).Return(nil, heimdall.ErrMethodNotAllowed)
+				exec.EXPECT().Execute(mock.Anything).Return(nil, heimdall.ErrNoRuleFound)
 			},
 			assertResponse: func(t *testing.T, err error, upstreamCalled bool, resp *http.Response) {
 				t.Helper()
@@ -167,20 +163,19 @@ func TestProxyService(t *testing.T) {
 				require.False(t, upstreamCalled)
 
 				require.NoError(t, err)
-				assert.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode)
+				assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 
 				data, err := io.ReadAll(resp.Body)
 				require.NoError(t, err)
 				assert.Empty(t, data)
 			},
 		},
-		{
-			uc: "rule execution fails due to not configured upstream url",
+		"rule execution fails due to not configured upstream url": {
 			createRequest: func(t *testing.T, host string) *http.Request {
 				t.Helper()
 
 				req, err := http.NewRequestWithContext(
-					context.TODO(),
+					t.Context(),
 					http.MethodPost,
 					fmt.Sprintf("http://%s/foobar", host),
 					nil,
@@ -207,13 +202,12 @@ func TestProxyService(t *testing.T) {
 				assert.Empty(t, data)
 			},
 		},
-		{
-			uc: "rule execution fails with authentication error",
+		"rule execution fails with authentication error": {
 			createRequest: func(t *testing.T, host string) *http.Request {
 				t.Helper()
 
 				req, err := http.NewRequestWithContext(
-					context.TODO(),
+					t.Context(),
 					http.MethodPost,
 					fmt.Sprintf("http://%s/foobar", host),
 					nil,
@@ -240,13 +234,12 @@ func TestProxyService(t *testing.T) {
 				assert.Empty(t, data)
 			},
 		},
-		{
-			uc: "rule execution fails with pipeline authorization error",
+		"rule execution fails with pipeline authorization error": {
 			createRequest: func(t *testing.T, host string) *http.Request {
 				t.Helper()
 
 				req, err := http.NewRequestWithContext(
-					context.TODO(),
+					t.Context(),
 					http.MethodPost,
 					fmt.Sprintf("http://%s/foobar", host),
 					nil,
@@ -273,17 +266,15 @@ func TestProxyService(t *testing.T) {
 				assert.Empty(t, data)
 			},
 		},
-		{
-			uc: "successful rule execution - request method and path are taken from the real request " +
-				"(trusted proxy not configured)",
-			serviceConf: config.ServiceConfig{
+		"successful rule execution - request method and path are taken from the real request (trusted proxy not configured)": {
+			serviceConf: config.ServeConfig{
 				Timeout: config.Timeout{Read: 1 * time.Second, Write: 1 * time.Second, Idle: 1 * time.Second},
 			},
 			createRequest: func(t *testing.T, host string) *http.Request {
 				t.Helper()
 
 				req, err := http.NewRequestWithContext(
-					context.TODO(),
+					t.Context(),
 					http.MethodPost,
 					fmt.Sprintf("http://%s/foobar", host),
 					strings.NewReader("hello"))
@@ -304,9 +295,10 @@ func TestProxyService(t *testing.T) {
 					Host:   upstreamURL.Host,
 					Path:   "/foobar",
 				})
+				backend.EXPECT().ForwardHostHeader().Return(true)
 
 				exec.EXPECT().Execute(
-					mock.MatchedBy(func(ctx heimdall.Context) bool {
+					mock.MatchedBy(func(ctx heimdall.RequestContext) bool {
 						ctx.AddHeaderForUpstream("X-Foo-Bar", "baz")
 						ctx.AddCookieForUpstream("X-Bar-Foo", "zab")
 
@@ -356,18 +348,16 @@ func TestProxyService(t *testing.T) {
 				assert.JSONEq(t, `{ "foo": "bar" }`, string(data))
 			},
 		},
-		{
-			uc: "successful rule execution - request method is taken from the header " +
-				"(trusted proxy configured)",
-			serviceConf: config.ServiceConfig{
+		"successful rule execution - request method is taken from the header (trusted proxy configured)": {
+			serviceConf: config.ServeConfig{
 				Timeout:        config.Timeout{Read: 1 * time.Second, Write: 1 * time.Second, Idle: 1 * time.Second},
-				TrustedProxies: &[]string{"0.0.0.0/0"},
+				TrustedProxies: []string{"0.0.0.0/0"},
 			},
 			createRequest: func(t *testing.T, host string) *http.Request {
 				t.Helper()
 
 				req, err := http.NewRequestWithContext(
-					context.TODO(),
+					t.Context(),
 					http.MethodPost,
 					"http://"+host+"/%5Bid%5D/foobar",
 					strings.NewReader("hello"))
@@ -387,9 +377,10 @@ func TestProxyService(t *testing.T) {
 					Host:   upstreamURL.Host,
 					Path:   "/[id]/foobar",
 				})
+				backend.EXPECT().ForwardHostHeader().Return(true)
 
 				exec.EXPECT().Execute(
-					mock.MatchedBy(func(ctx heimdall.Context) bool {
+					mock.MatchedBy(func(ctx heimdall.RequestContext) bool {
 						ctx.AddHeaderForUpstream("X-Foo-Bar", "baz")
 						ctx.AddCookieForUpstream("X-Bar-Foo", "zab")
 
@@ -438,18 +429,16 @@ func TestProxyService(t *testing.T) {
 				assert.JSONEq(t, `{ "foo": "bar" }`, string(data))
 			},
 		},
-		{
-			uc: "successful rule execution - request path is taken from the header " +
-				"(trusted proxy configured)",
-			serviceConf: config.ServiceConfig{
+		"successful rule execution - request path is taken from the header (trusted proxy configured)": {
+			serviceConf: config.ServeConfig{
 				Timeout:        config.Timeout{Read: 1 * time.Second, Write: 1 * time.Second, Idle: 1 * time.Second},
-				TrustedProxies: &[]string{"0.0.0.0/0"},
+				TrustedProxies: []string{"0.0.0.0/0"},
 			},
 			createRequest: func(t *testing.T, host string) *http.Request {
 				t.Helper()
 
 				req, err := http.NewRequestWithContext(
-					context.TODO(),
+					t.Context(),
 					http.MethodPost,
 					fmt.Sprintf("http://%s/foobar", host),
 					strings.NewReader("hello"))
@@ -469,9 +458,10 @@ func TestProxyService(t *testing.T) {
 					Host:   upstreamURL.Host,
 					Path:   "/[barfoo]",
 				})
+				backend.EXPECT().ForwardHostHeader().Return(true)
 
 				exec.EXPECT().Execute(
-					mock.MatchedBy(func(ctx heimdall.Context) bool {
+					mock.MatchedBy(func(ctx heimdall.RequestContext) bool {
 						ctx.AddHeaderForUpstream("X-Foo-Bar", "baz")
 						ctx.AddCookieForUpstream("X-Bar-Foo", "zab")
 
@@ -520,9 +510,8 @@ func TestProxyService(t *testing.T) {
 				assert.JSONEq(t, `{ "foo": "bar" }`, string(data))
 			},
 		},
-		{
-			uc: "CORS test actual request",
-			serviceConf: config.ServiceConfig{
+		"CORS test actual request": {
+			serviceConf: config.ServeConfig{
 				Timeout: config.Timeout{Read: 1 * time.Second, Write: 1 * time.Second, Idle: 1 * time.Second},
 				CORS: &config.CORS{
 					AllowedMethods:   []string{http.MethodGet},
@@ -537,7 +526,7 @@ func TestProxyService(t *testing.T) {
 				t.Helper()
 
 				req, err := http.NewRequestWithContext(
-					context.TODO(),
+					t.Context(),
 					http.MethodGet,
 					fmt.Sprintf("http://%s/foobar", host),
 					strings.NewReader("hello"))
@@ -557,9 +546,10 @@ func TestProxyService(t *testing.T) {
 					Host:   upstreamURL.Host,
 					Path:   "/bar",
 				})
+				backend.EXPECT().ForwardHostHeader().Return(true)
 
 				exec.EXPECT().Execute(
-					mock.MatchedBy(func(ctx heimdall.Context) bool {
+					mock.MatchedBy(func(ctx heimdall.RequestContext) bool {
 						ctx.AddHeaderForUpstream("X-Foo-Bar", "baz")
 
 						pathMatched := ctx.Request().URL.Path == "/foobar"
@@ -605,9 +595,8 @@ func TestProxyService(t *testing.T) {
 				assert.JSONEq(t, `{ "foo": "bar" }`, string(data))
 			},
 		},
-		{
-			uc: "CORS test preflight request",
-			serviceConf: config.ServiceConfig{
+		"CORS test preflight request": {
+			serviceConf: config.ServeConfig{
 				Timeout: config.Timeout{Read: 10 * time.Second},
 				CORS: &config.CORS{
 					AllowedMethods:   []string{http.MethodGet},
@@ -622,7 +611,7 @@ func TestProxyService(t *testing.T) {
 				t.Helper()
 
 				req, err := http.NewRequestWithContext(
-					context.TODO(),
+					t.Context(),
 					http.MethodOptions,
 					fmt.Sprintf("http://%s/foobar", host),
 					nil)
@@ -647,9 +636,8 @@ func TestProxyService(t *testing.T) {
 				assert.NotEmpty(t, resp.Header["Vary"])
 			},
 		},
-		{
-			uc: "test metrics collection",
-			serviceConf: config.ServiceConfig{
+		"test metrics collection": {
+			serviceConf: config.ServeConfig{
 				Timeout: config.Timeout{Read: 10 * time.Second},
 				CORS: &config.CORS{
 					AllowedMethods:   []string{http.MethodGet},
@@ -665,7 +653,7 @@ func TestProxyService(t *testing.T) {
 				t.Helper()
 
 				req, err := http.NewRequestWithContext(
-					context.TODO(),
+					t.Context(),
 					http.MethodOptions,
 					fmt.Sprintf("http://%s/foobar", host),
 					nil)
@@ -686,9 +674,8 @@ func TestProxyService(t *testing.T) {
 				assert.Equal(t, http.StatusNoContent, resp.StatusCode)
 			},
 		},
-		{
-			uc: "http2 usage",
-			serviceConf: config.ServiceConfig{
+		"http2 usage": {
+			serviceConf: config.ServeConfig{
 				Timeout: config.Timeout{Read: 1000 * time.Second, Write: 1000 * time.Second, Idle: 1000 * time.Second},
 				TLS: &config.TLS{
 					KeyStore: config.KeyStore{
@@ -716,7 +703,7 @@ func TestProxyService(t *testing.T) {
 				t.Helper()
 
 				req, err := http.NewRequestWithContext(
-					context.TODO(),
+					t.Context(),
 					http.MethodGet,
 					fmt.Sprintf("https://%s/foobar", host),
 					strings.NewReader("hello"))
@@ -733,9 +720,10 @@ func TestProxyService(t *testing.T) {
 					Host:   upstreamURL.Host,
 					Path:   "/bar",
 				})
+				backend.EXPECT().ForwardHostHeader().Return(false)
 
 				exec.EXPECT().Execute(
-					mock.MatchedBy(func(ctx heimdall.Context) bool {
+					mock.MatchedBy(func(ctx heimdall.RequestContext) bool {
 						ctx.AddHeaderForUpstream("X-Foo-Bar", "baz")
 
 						pathMatched := ctx.Request().URL.Path == "/foobar"
@@ -780,10 +768,9 @@ func TestProxyService(t *testing.T) {
 				assert.JSONEq(t, `{ "foo": "bar" }`, string(data))
 			},
 		},
-		{
-			uc:           "http2 not supported by upstream server",
+		"http2 not supported by upstream server": {
 			disableHTTP2: true,
-			serviceConf: config.ServiceConfig{
+			serviceConf: config.ServeConfig{
 				Timeout: config.Timeout{Read: 1 * time.Second, Write: 1 * time.Second, Idle: 1 * time.Second},
 				TLS: &config.TLS{
 					KeyStore: config.KeyStore{
@@ -811,7 +798,7 @@ func TestProxyService(t *testing.T) {
 				t.Helper()
 
 				req, err := http.NewRequestWithContext(
-					context.TODO(),
+					t.Context(),
 					http.MethodGet,
 					fmt.Sprintf("https://%s/foobar", host),
 					strings.NewReader("hello"))
@@ -828,9 +815,10 @@ func TestProxyService(t *testing.T) {
 					Host:   upstreamURL.Host,
 					Path:   "/bar",
 				})
+				backend.EXPECT().ForwardHostHeader().Return(true)
 
 				exec.EXPECT().Execute(
-					mock.MatchedBy(func(ctx heimdall.Context) bool {
+					mock.MatchedBy(func(ctx heimdall.RequestContext) bool {
 						ctx.AddHeaderForUpstream("X-Foo-Bar", "baz")
 
 						pathMatched := ctx.Request().URL.Path == "/foobar"
@@ -876,7 +864,7 @@ func TestProxyService(t *testing.T) {
 			},
 		},
 	} {
-		t.Run("case="+tc.uc, func(t *testing.T) {
+		t.Run(uc, func(t *testing.T) {
 			// GIVEN
 			exp := metric.NewManualReader()
 
@@ -928,11 +916,11 @@ func TestProxyService(t *testing.T) {
 			proxyConf.Host = "127.0.0.1"
 			proxyConf.Port = port
 
-			listener, err := listener.New("tcp", proxyConf.Address(), proxyConf.TLS, nil)
+			lstnr, err := listener.New(t.Context(), "test", proxyConf.Address(), proxyConf.TLS, nil, nil)
 			require.NoError(t, err)
 
 			conf := &config.Configuration{
-				Serve:   config.ServeConfig{Proxy: proxyConf},
+				Serve:   proxyConf,
 				Metrics: config.MetricsConfig{Enabled: tc.enableMetrics},
 			}
 			cch := mocks.NewCacheMock(t)
@@ -942,12 +930,12 @@ func TestProxyService(t *testing.T) {
 
 			client := createClient(t)
 
-			proxy := newService(conf, cch, log.Logger, exec, nil)
+			proxy := newService(conf, cch, log.Logger, exec)
 
-			defer proxy.Shutdown(context.Background())
+			defer proxy.Shutdown(t.Context())
 
 			go func() {
-				proxy.Serve(listener)
+				proxy.Serve(lstnr)
 			}()
 
 			time.Sleep(50 * time.Millisecond)
@@ -964,7 +952,7 @@ func TestProxyService(t *testing.T) {
 
 			var rm metricdata.ResourceMetrics
 
-			err = exp.Collect(context.TODO(), &rm)
+			err = exp.Collect(t.Context(), &rm)
 
 			if tc.enableMetrics {
 				require.NoError(t, err)
@@ -983,7 +971,7 @@ func TestWebSocketSupport(t *testing.T) {
 	require.NoError(t, err)
 
 	upstreamSrv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
-		require.Equal(t, "/bar", req.URL.Path)
+		assert.Equal(t, "/bar", req.URL.Path)
 
 		upgrader := websocket.Upgrader{
 			CheckOrigin: func(_ *http.Request) bool {
@@ -992,22 +980,22 @@ func TestWebSocketSupport(t *testing.T) {
 		}
 
 		con, err := upgrader.Upgrade(rw, req, nil)
-		require.NoError(t, err)
+		assert.NoError(t, err)
 
 		defer con.Close()
 
 		err = con.WriteMessage(websocket.TextMessage, []byte("ping 1"))
-		require.NoError(t, err)
+		assert.NoError(t, err)
 
 		_, message, err := con.ReadMessage()
-		require.NoError(t, err)
+		assert.NoError(t, err)
 		assert.Equal(t, []byte("ping 1"), message)
 
 		err = con.WriteMessage(websocket.TextMessage, []byte("ping 2"))
-		require.NoError(t, err)
+		assert.NoError(t, err)
 
 		_, message, err = con.ReadMessage()
-		require.NoError(t, err)
+		assert.NoError(t, err)
 		assert.Equal(t, []byte("ping 2"), message)
 	}))
 	defer upstreamSrv.Close()
@@ -1022,9 +1010,10 @@ func TestWebSocketSupport(t *testing.T) {
 		Host:   upstreamURL.Host,
 		Path:   "/bar",
 	})
+	backend.EXPECT().ForwardHostHeader().Return(true)
 
 	exec.EXPECT().Execute(
-		mock.MatchedBy(func(ctx heimdall.Context) bool {
+		mock.MatchedBy(func(ctx heimdall.RequestContext) bool {
 			pathMatched := ctx.Request().URL.Path == "/foo"
 			methodMatched := ctx.Request().Method == http.MethodGet
 
@@ -1034,32 +1023,30 @@ func TestWebSocketSupport(t *testing.T) {
 
 	conf := &config.Configuration{
 		Serve: config.ServeConfig{
-			Proxy: config.ServiceConfig{
-				Timeout: config.Timeout{
-					Read:  1 * time.Second,
-					Write: 1 * time.Second,
-					Idle:  1 * time.Second,
-				},
-				Host: "127.0.0.1",
-				Port: port,
+			Timeout: config.Timeout{
+				Read:  1 * time.Second,
+				Write: 1 * time.Second,
+				Idle:  1 * time.Second,
 			},
+			Host: "127.0.0.1",
+			Port: port,
 		},
 	}
 
-	proxy := newService(conf, mocks.NewCacheMock(t), log.Logger, exec, nil)
+	proxy := newService(conf, mocks.NewCacheMock(t), log.Logger, exec)
 
-	defer proxy.Shutdown(context.Background())
+	defer proxy.Shutdown(t.Context())
 
-	listener, err := listener.New("tcp", conf.Serve.Proxy.Address(), conf.Serve.Proxy.TLS, nil)
+	lstnr, err := listener.New(t.Context(), "test", conf.Serve.Address(), conf.Serve.TLS, nil, nil)
 	require.NoError(t, err)
 
 	go func() {
-		proxy.Serve(listener)
+		proxy.Serve(lstnr)
 	}()
 
 	time.Sleep(50 * time.Millisecond)
 
-	wsURL := url.URL{Scheme: "ws", Host: conf.Serve.Proxy.Address(), Path: "/foo"}
+	wsURL := url.URL{Scheme: "ws", Host: conf.Serve.Address(), Path: "/foo"}
 	con, resp, err := websocket.DefaultDialer.Dial(wsURL.String(), nil)
 	require.NoError(t, err)
 
@@ -1092,7 +1079,7 @@ func TestServerSentEventsSupport(t *testing.T) {
 	require.NoError(t, err)
 
 	upstreamSrv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
-		require.Equal(t, "/bar", req.URL.Path)
+		assert.Equal(t, "/bar", req.URL.Path)
 
 		rw.Header().Set("Content-Type", "text/event-stream")
 		rw.Header().Set("Cache-Control", "no-cache")
@@ -1102,9 +1089,9 @@ func TestServerSentEventsSupport(t *testing.T) {
 
 		for i := range 5 {
 			_, err := rw.Write(stringx.ToBytes(strconv.Itoa(i)))
-			require.NoError(t, err)
+			assert.NoError(t, err)
 
-			require.NoError(t, rc.Flush())
+			assert.NoError(t, rc.Flush())
 
 			time.Sleep(50 * time.Millisecond)
 		}
@@ -1122,9 +1109,10 @@ func TestServerSentEventsSupport(t *testing.T) {
 		Host:   upstreamURL.Host,
 		Path:   "/bar",
 	})
+	backend.EXPECT().ForwardHostHeader().Return(true)
 
 	exec.EXPECT().Execute(
-		mock.MatchedBy(func(ctx heimdall.Context) bool {
+		mock.MatchedBy(func(ctx heimdall.RequestContext) bool {
 			pathMatched := ctx.Request().URL.Path == "/foo"
 			methodMatched := ctx.Request().Method == http.MethodGet
 
@@ -1134,32 +1122,30 @@ func TestServerSentEventsSupport(t *testing.T) {
 
 	conf := &config.Configuration{
 		Serve: config.ServeConfig{
-			Proxy: config.ServiceConfig{
-				Timeout: config.Timeout{
-					Read:  40 * time.Millisecond,
-					Write: 50 * time.Millisecond,
-					Idle:  1 * time.Second,
-				},
-				Host: "127.0.0.1",
-				Port: port,
+			Timeout: config.Timeout{
+				Read:  40 * time.Millisecond,
+				Write: 50 * time.Millisecond,
+				Idle:  1 * time.Second,
 			},
+			Host: "127.0.0.1",
+			Port: port,
 		},
 	}
 
-	proxy := newService(conf, mocks.NewCacheMock(t), log.Logger, exec, nil)
+	proxy := newService(conf, mocks.NewCacheMock(t), log.Logger, exec)
 
-	defer proxy.Shutdown(context.Background())
+	defer proxy.Shutdown(t.Context())
 
-	listener, err := listener.New("tcp", conf.Serve.Proxy.Address(), conf.Serve.Proxy.TLS, nil)
+	lstnr, err := listener.New(t.Context(), "test", conf.Serve.Address(), conf.Serve.TLS, nil, nil)
 	require.NoError(t, err)
 
 	go func() {
-		proxy.Serve(listener)
+		proxy.Serve(lstnr)
 	}()
 
 	time.Sleep(50 * time.Millisecond)
 
-	req, err := http.NewRequestWithContext(context.TODO(), http.MethodGet, fmt.Sprintf("http://%s/foo", conf.Serve.Proxy.Address()), nil)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, fmt.Sprintf("http://%s/foo", conf.Serve.Address()), nil)
 	require.NoError(t, err)
 	req.Header.Set("Cache-Control", "no-cache")
 	req.Header.Set("Accept", "text/event-stream")

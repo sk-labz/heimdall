@@ -17,7 +17,6 @@
 package cloudblob
 
 import (
-	"context"
 	"fmt"
 	"net/http/httptest"
 	"net/url"
@@ -29,8 +28,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/dadrus/heimdall/internal/app"
 	"github.com/dadrus/heimdall/internal/heimdall"
 	"github.com/dadrus/heimdall/internal/rules/config"
+	"github.com/dadrus/heimdall/internal/validation"
 	"github.com/dadrus/heimdall/internal/x"
 )
 
@@ -62,14 +63,12 @@ func TestFetchRuleSets(t *testing.T) {
 		}
 	}
 
-	for _, tc := range []struct {
-		uc       string
+	for uc, tc := range map[string]struct {
 		endpoint ruleSetEndpoint
 		setup    func(t *testing.T)
 		assert   func(t *testing.T, err error, ruleSets []*config.RuleSet)
 	}{
-		{
-			uc: "failed to open bucket",
+		"failed to open bucket": {
 			endpoint: ruleSetEndpoint{
 				URL: &url.URL{
 					Scheme:   "s3",
@@ -82,33 +81,31 @@ func TestFetchRuleSets(t *testing.T) {
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrInternal)
-				assert.Contains(t, err.Error(), "failed to open bucket")
+				require.ErrorContains(t, err, "failed to open bucket")
 			},
 		},
-		{
-			uc: "iterate not existing bucket",
+		"iterate not existing bucket": {
 			endpoint: ruleSetEndpoint{
 				URL: &url.URL{
 					Scheme:   "s3",
 					Host:     "foo",
-					RawQuery: fmt.Sprintf("endpoint=%s&disableSSL=true&s3ForcePathStyle=true&region=eu-central-1", srv.URL),
+					RawQuery: fmt.Sprintf("endpoint=%s&region=eu-central-1", srv.URL),
 				},
 			},
 			assert: func(t *testing.T, err error, _ []*config.RuleSet) {
 				t.Helper()
 
 				require.Error(t, err)
-				require.ErrorIs(t, err, heimdall.ErrInternal)
-				assert.Contains(t, err.Error(), "failed iterate blobs")
+				require.ErrorIs(t, err, heimdall.ErrCommunication)
+				require.ErrorContains(t, err, "failed iterate blobs")
 			},
 		},
-		{
-			uc: "invalid rule set",
+		"invalid rule set": {
 			endpoint: ruleSetEndpoint{
 				URL: &url.URL{
 					Scheme:   "s3",
 					Host:     bucketName,
-					RawQuery: fmt.Sprintf("endpoint=%s&disableSSL=true&s3ForcePathStyle=true&region=eu-central-1", srv.URL),
+					RawQuery: fmt.Sprintf("endpoint=%s&region=eu-central-1", srv.URL),
 				},
 			},
 			setup: func(t *testing.T) {
@@ -126,16 +123,15 @@ func TestFetchRuleSets(t *testing.T) {
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrInternal)
-				assert.Contains(t, err.Error(), "failed to decode")
+				require.ErrorContains(t, err, "failed to decode")
 			},
 		},
-		{
-			uc: "empty bucket",
+		"empty bucket": {
 			endpoint: ruleSetEndpoint{
 				URL: &url.URL{
 					Scheme:   "s3",
 					Host:     bucketName,
-					RawQuery: fmt.Sprintf("endpoint=%s&disableSSL=true&s3ForcePathStyle=true&region=eu-central-1", srv.URL),
+					RawQuery: fmt.Sprintf("endpoint=%s&region=eu-central-1", srv.URL),
 				},
 			},
 			assert: func(t *testing.T, err error, ruleSets []*config.RuleSet) {
@@ -145,13 +141,12 @@ func TestFetchRuleSets(t *testing.T) {
 				require.Empty(t, ruleSets)
 			},
 		},
-		{
-			uc: "bucket with an empty blob",
+		"bucket with an empty blob": {
 			endpoint: ruleSetEndpoint{
 				URL: &url.URL{
 					Scheme:   "s3",
 					Host:     bucketName,
-					RawQuery: fmt.Sprintf("endpoint=%s&disableSSL=true&s3ForcePathStyle=true&region=eu-central-1", srv.URL),
+					RawQuery: fmt.Sprintf("endpoint=%s&region=eu-central-1", srv.URL),
 				},
 			},
 			setup: func(t *testing.T) {
@@ -169,55 +164,13 @@ func TestFetchRuleSets(t *testing.T) {
 				require.Empty(t, ruleSets)
 			},
 		},
-		{
-			uc: "rule set with path prefix validation error",
+		"multiple valid rule sets in yaml and json formats": {
 			endpoint: ruleSetEndpoint{
 				URL: &url.URL{
 					Scheme:   "s3",
 					Host:     bucketName,
-					RawQuery: fmt.Sprintf("endpoint=%s&disableSSL=true&s3ForcePathStyle=true&region=eu-central-1", srv.URL),
+					RawQuery: fmt.Sprintf("endpoint=%s&region=eu-central-1", srv.URL),
 				},
-				RulesPathPrefix: "foo/bar",
-			},
-			setup: func(t *testing.T) {
-				t.Helper()
-
-				data := `
-{
-	"version": "1",
-	"name": "test",
-	"rules": [{
-		"id": "foobar",
-		"match": "http://<**>/bar/foo/api",
-		"methods": ["GET", "POST"],
-		"execute": [
-			{ "authenticator": "foobar" }
-		]
-	}]
-}`
-
-				_, err := backend.PutObject(bucketName, "test-rule",
-					map[string]string{"Content-Type": "application/json"},
-					strings.NewReader(data), int64(len(data)))
-				require.NoError(t, err)
-			},
-			assert: func(t *testing.T, err error, _ []*config.RuleSet) {
-				t.Helper()
-
-				require.Error(t, err)
-				require.ErrorIs(t, err, heimdall.ErrConfiguration)
-				assert.Contains(t, err.Error(), "path prefix validation")
-			},
-		},
-		{
-			uc: "multiple valid rule sets in yaml and json formats",
-			endpoint: ruleSetEndpoint{
-				URL: &url.URL{
-					Scheme:   "s3",
-					Host:     bucketName,
-					RawQuery: fmt.Sprintf("endpoint=%s&disableSSL=true&s3ForcePathStyle=true&region=eu-central-1", srv.URL),
-				},
-				RulesPathPrefix: "foo/bar",
 			},
 			setup: func(t *testing.T) {
 				t.Helper()
@@ -228,8 +181,14 @@ func TestFetchRuleSets(t *testing.T) {
 	"name": "test",
 	"rules": [{
 		"id": "foobar",
-		"match": "http://<**>/foo/bar/api1",
-		"methods": ["GET", "POST"],
+        "match": {
+          "routes": [
+            { "path": "/foo/bar/api1" }
+          ],
+          "scheme": "http",
+          "hosts": [{ "type": "wildcard", "value": "*.example.com"}],
+          "methods": ["GET", "POST"]
+        },
 		"execute": [
 			{ "authenticator": "foobar" }
 		]
@@ -241,13 +200,19 @@ version: "1"
 name: test2
 rules:
 - id: barfoo
-  match: http://<**>/foo/bar/api2
-  methods: 
-  - GET
-  - POST
+  match:
+    routes:
+      - path: /foo/bar/api2
+    scheme: http
+    hosts:
+      - type: wildcard
+        value: "*.example.com"
+    methods: 
+      - GET
+      - POST
   execute:
-  - authenticator: barfoo`
-
+  - authenticator: barfoo
+`
 				_, err := backend.PutObject(bucketName, "test-rule1",
 					map[string]string{"Content-Type": "application/json"},
 					strings.NewReader(ruleSet1), int64(len(ruleSet1)))
@@ -276,13 +241,12 @@ rules:
 				assert.Equal(t, "barfoo", ruleSets[1].Rules[0].ID)
 			},
 		},
-		{
-			uc: "only one rule set adhering to the required prefix",
+		"only one rule set adhering to the required prefix": {
 			endpoint: ruleSetEndpoint{
 				URL: &url.URL{
 					Scheme:   "s3",
 					Host:     bucketName,
-					RawQuery: fmt.Sprintf("endpoint=%s&disableSSL=true&s3ForcePathStyle=true&region=eu-central-1", srv.URL),
+					RawQuery: fmt.Sprintf("endpoint=%s&region=eu-central-1", srv.URL),
 				},
 				Prefix: "api",
 			},
@@ -294,8 +258,14 @@ rules:
 				"name": "test1",
 				"rules": [{
 					"id": "foobar",
-					"match": "http://<**>/foo/bar/api1",
-					"methods": ["GET", "POST"],
+                    "match": {
+                      "routes": [
+                         { "path": "/foo/bar/api1" }
+                      ],
+                      "scheme": "http",
+                      "hosts": [{ "type": "exact", "value": "example.com" }],
+                      "methods": ["GET", "POST"]
+                    },
 					"execute": [
 						{ "authenticator": "foobar" }
 					]
@@ -306,8 +276,14 @@ rules:
 				"name": "test2",
 				"rules": [{
 					"id": "barfoo",
-					"url": "http://<**>/foo/bar/api2",
-					"methods": ["GET", "POST"],
+                    "match": {
+                      "routes": [
+                        { "path": "/foo/bar/api2" }
+                      ],
+                      "scheme": "http",
+                      "hosts": [{ "type": "wildcard", "value": "*"}],
+                      "methods": ["GET", "POST"]
+                    },
 					"execute": [
 						{ "authenticator": "barfoo" }
 					]
@@ -336,14 +312,13 @@ rules:
 				assert.Equal(t, "foobar", ruleSets[0].Rules[0].ID)
 			},
 		},
-		{
-			uc: "not existing rule set specified in the path",
+		"not existing rule set specified in the path": {
 			endpoint: ruleSetEndpoint{
 				URL: &url.URL{
 					Scheme:   "s3",
 					Host:     bucketName,
 					Path:     "ruleset",
-					RawQuery: fmt.Sprintf("endpoint=%s&disableSSL=true&s3ForcePathStyle=true&region=eu-central-1", srv.URL),
+					RawQuery: fmt.Sprintf("endpoint=%s&region=eu-central-1", srv.URL),
 				},
 				Prefix: "api",
 			},
@@ -352,17 +327,16 @@ rules:
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrInternal)
-				assert.Contains(t, err.Error(), "attributes")
+				require.ErrorContains(t, err, "attributes")
 			},
 		},
-		{
-			uc: "empty blob specified in the path",
+		"empty blob specified in the path": {
 			endpoint: ruleSetEndpoint{
 				URL: &url.URL{
 					Scheme:   "s3",
 					Host:     bucketName,
 					Path:     "ruleset",
-					RawQuery: fmt.Sprintf("endpoint=%s&disableSSL=true&s3ForcePathStyle=true&region=eu-central-1", srv.URL),
+					RawQuery: fmt.Sprintf("endpoint=%s&region=eu-central-1", srv.URL),
 				},
 				Prefix: "api",
 			},
@@ -381,14 +355,13 @@ rules:
 				assert.Empty(t, ruleSets)
 			},
 		},
-		{
-			uc: "existing rule set specified in the path",
+		"existing rule set specified in the path": {
 			endpoint: ruleSetEndpoint{
 				URL: &url.URL{
 					Scheme:   "s3",
 					Host:     bucketName,
 					Path:     "ruleset",
-					RawQuery: fmt.Sprintf("endpoint=%s&disableSSL=true&s3ForcePathStyle=true&region=eu-central-1", srv.URL),
+					RawQuery: fmt.Sprintf("endpoint=%s&region=eu-central-1", srv.URL),
 				},
 				Prefix: "api",
 			},
@@ -400,8 +373,14 @@ rules:
 				"name": "test",
 				"rules": [{
 					"id": "foobar",
-					"match": "http://<**>/foo/bar/api1",
-					"methods": ["GET", "POST"],
+                    "match": {
+                      "routes": [
+                        { "path": "/foo/bar/api1" }
+                      ],
+                      "scheme": "http",
+                      "hosts": [{ "type": "exact", "value": "example.com" }],
+                      "methods": ["GET", "POST"]
+                    },
 					"execute": [
 						{ "authenticator": "foobar" }
 					]
@@ -426,15 +405,21 @@ rules:
 			},
 		},
 	} {
-		t.Run(tc.uc, func(t *testing.T) {
+		t.Run(uc, func(t *testing.T) {
 			// GIVEN
 			clearBucket(t)
+
+			validator, err := validation.NewValidator()
+			require.NoError(t, err)
+
+			appCtx := app.NewContextMock(t)
+			appCtx.EXPECT().Validator().Maybe().Return(validator)
 
 			setup := x.IfThenElse(tc.setup != nil, tc.setup, func(t *testing.T) { t.Helper() })
 			setup(t)
 
 			// WHEN
-			rs, err := tc.endpoint.FetchRuleSets(context.Background())
+			rs, err := tc.endpoint.FetchRuleSets(t.Context(), appCtx)
 
 			// THEN
 			tc.assert(t, err, rs)

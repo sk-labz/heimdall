@@ -19,15 +19,12 @@ package decision
 import (
 	"context"
 
-	"github.com/rs/zerolog"
 	"go.uber.org/fx"
 
+	"github.com/dadrus/heimdall/internal/app"
 	"github.com/dadrus/heimdall/internal/cache"
-	"github.com/dadrus/heimdall/internal/config"
 	"github.com/dadrus/heimdall/internal/handler/fxlcm"
-	"github.com/dadrus/heimdall/internal/heimdall"
 	"github.com/dadrus/heimdall/internal/rules/rule"
-	"github.com/dadrus/heimdall/internal/watcher"
 )
 
 var Module = fx.Invoke( // nolint: gochecknoglobals
@@ -38,22 +35,17 @@ var Module = fx.Invoke( // nolint: gochecknoglobals
 	),
 )
 
-func newLifecycleManager(
-	conf *config.Configuration,
-	logger zerolog.Logger,
-	cch cache.Cache,
-	exec rule.Executor,
-	signer heimdall.JWTSigner,
-	cw watcher.Watcher,
-) *fxlcm.LifecycleManager {
-	cfg := conf.Serve.Decision
+func newLifecycleManager(app app.Context, cch cache.Cache, exec rule.Executor) *fxlcm.LifecycleManager {
+	conf := app.Config()
+	logger := app.Logger()
+	cfg := conf.Serve
 
 	return &fxlcm.LifecycleManager{
 		ServiceName:    "Decision",
 		ServiceAddress: cfg.Address(),
-		Server:         newService(conf, cch, logger, exec, signer),
+		Server:         newService(conf, cch, logger, exec),
 		Logger:         logger,
 		TLSConf:        cfg.TLS,
-		FileWatcher:    cw,
+		FileWatcher:    app.Watcher(),
 	}
 }

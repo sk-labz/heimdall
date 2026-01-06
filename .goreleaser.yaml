@@ -1,3 +1,5 @@
+version: 2
+
 builds:
   - env:
       - CGO_ENABLED=0
@@ -31,14 +33,14 @@ builds:
 
 
 changelog:
-  skip: true
+  disable: true
 
 archives:
-  - format: tar.gz
+  - formats: [ "tar.gz" ]
     name_template: '{{ .ProjectName }}_{{ .Tag }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}{{ with .Mips }}_{{ . }}{{ end }}{{ if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}'
     format_overrides:
       - goos: windows
-        format: zip
+        formats: [ "zip" ]
     files:
       - LICENSE
       - CHANGELOG.md
@@ -49,12 +51,12 @@ checksum:
 
 signs:
   - cmd: cosign
-    signature: "${artifact}-keyless.sig"
-    certificate: "${artifact}-keyless.pem"
+    signature: "${artifact}.sig"
+    certificate: "${artifact}.pem"
     args:
       - "sign-blob"
-      - "--output-signature=${artifact}-keyless.sig"
-      - "--output-certificate=${artifact}-keyless.pem"
+      - "--output-signature=${artifact}.sig"
+      - "--output-certificate=${artifact}.pem"
       - "${artifact}"
       - "--yes"
     artifacts: all

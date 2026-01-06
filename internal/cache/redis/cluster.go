@@ -19,8 +19,8 @@ package redis
 import (
 	"time"
 
+	"github.com/dadrus/heimdall/internal/app"
 	"github.com/dadrus/heimdall/internal/cache"
-	"github.com/dadrus/heimdall/internal/watcher"
 )
 
 // by intention. Used only during application bootstrap.
@@ -28,7 +28,7 @@ func init() { // nolint: gochecknoinits
 	cache.Register("redis-cluster", cache.FactoryFunc(NewClusterCache))
 }
 
-func NewClusterCache(conf map[string]any, cw watcher.Watcher) (cache.Cache, error) {
+func NewClusterCache(app app.Context, conf map[string]any) (cache.Cache, error) {
 	type Config struct {
 		baseConfig `mapstructure:",squash"`
 
@@ -36,15 +36,15 @@ func NewClusterCache(conf map[string]any, cw watcher.Watcher) (cache.Cache, erro
 	}
 
 	cfg := Config{
-		baseConfig: baseConfig{ClientCache: clientCache{TTL: 5 * time.Minute}}, //nolint:gomnd
+		baseConfig: baseConfig{ClientCache: clientCache{TTL: 5 * time.Minute}}, //nolint:mnd
 	}
 
-	err := decodeConfig(conf, &cfg)
+	err := decodeConfig(app.Validator(), conf, &cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	opts, err := cfg.clientOptions(cw)
+	opts, err := cfg.clientOptions(app, "redis-cluster")
 	if err != nil {
 		return nil, err
 	}
@@ -52,5 +52,5 @@ func NewClusterCache(conf map[string]any, cw watcher.Watcher) (cache.Cache, erro
 	opts.InitAddress = cfg.Nodes
 	opts.ShuffleInit = true
 
-	return newRedisCache(opts, cfg.ClientCache.TTL)
+	return newRedisCache(opts, cfg.ClientCache.TTL), nil
 }

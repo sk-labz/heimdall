@@ -20,7 +20,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -30,14 +29,12 @@ func TestClaimsValidate(t *testing.T) {
 	dateInTheFuture := NumericDate(time.Now().Add(1 * time.Minute).Unix())
 	dateInThePast := NumericDate(time.Now().Add(-1 * time.Minute).Unix())
 
-	for _, tc := range []struct {
-		uc           string
+	for uc, tc := range map[string]struct {
 		claims       Claims
 		expectations Expectation
 		assert       func(t *testing.T, err error)
 	}{
-		{
-			uc: "fails on issuer assertion",
+		"fails on issuer assertion": {
 			claims: Claims{
 				Issuer: "foo",
 			},
@@ -48,11 +45,10 @@ func TestClaimsValidate(t *testing.T) {
 				t.Helper()
 
 				require.Error(t, err)
-				assert.Contains(t, err.Error(), "issuer")
+				require.ErrorContains(t, err, "issuer")
 			},
 		},
-		{
-			uc: "fails on audience assertion",
+		"fails on audience assertion": {
 			claims: Claims{
 				Issuer:   "foo",
 				Audience: Audience{"bar"},
@@ -65,11 +61,10 @@ func TestClaimsValidate(t *testing.T) {
 				t.Helper()
 
 				require.Error(t, err)
-				assert.Contains(t, err.Error(), "audience")
+				require.ErrorContains(t, err, "audience")
 			},
 		},
-		{
-			uc: "fails on validity assertion",
+		"fails on validity assertion": {
 			claims: Claims{
 				Issuer:    "foo",
 				Audience:  Audience{"bar"},
@@ -83,11 +78,10 @@ func TestClaimsValidate(t *testing.T) {
 				t.Helper()
 
 				require.Error(t, err)
-				assert.Contains(t, err.Error(), "valid")
+				require.ErrorContains(t, err, "valid")
 			},
 		},
-		{
-			uc: "fails on issuance time assertion",
+		"fails on issuance time assertion": {
 			claims: Claims{
 				Issuer:    "foo",
 				Audience:  Audience{"bar"},
@@ -102,11 +96,10 @@ func TestClaimsValidate(t *testing.T) {
 				t.Helper()
 
 				require.Error(t, err)
-				assert.Contains(t, err.Error(), "issued")
+				require.ErrorContains(t, err, "issued")
 			},
 		},
-		{
-			uc: "fails on scp assertion",
+		"fails on scp assertion": {
 			claims: Claims{
 				Issuer:    "foo",
 				Audience:  Audience{"bar"},
@@ -123,11 +116,10 @@ func TestClaimsValidate(t *testing.T) {
 				t.Helper()
 
 				require.Error(t, err)
-				assert.Contains(t, err.Error(), "scope")
+				require.ErrorContains(t, err, "scope")
 			},
 		},
-		{
-			uc: "fails on scope assertion",
+		"fails on scope assertion": {
 			claims: Claims{
 				Issuer:    "foo",
 				Audience:  Audience{"bar"},
@@ -144,11 +136,10 @@ func TestClaimsValidate(t *testing.T) {
 				t.Helper()
 
 				require.Error(t, err)
-				assert.Contains(t, err.Error(), "scope")
+				require.ErrorContains(t, err, "scope")
 			},
 		},
-		{
-			uc: "succeeds using scope claim",
+		"succeeds using scope claim": {
 			claims: Claims{
 				Issuer:    "foo",
 				Audience:  Audience{"bar"},
@@ -167,8 +158,7 @@ func TestClaimsValidate(t *testing.T) {
 				require.NoError(t, err)
 			},
 		},
-		{
-			uc: "succeeds using scp claim",
+		"succeeds using scp claim": {
 			claims: Claims{
 				Issuer:    "foo",
 				Audience:  Audience{"bar"},
@@ -188,7 +178,7 @@ func TestClaimsValidate(t *testing.T) {
 			},
 		},
 	} {
-		t.Run("case="+tc.uc, func(t *testing.T) {
+		t.Run(uc, func(t *testing.T) {
 			// WHEN
 			err := tc.claims.Validate(tc.expectations)
 

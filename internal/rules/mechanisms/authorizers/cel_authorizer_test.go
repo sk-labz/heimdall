@@ -17,52 +17,49 @@
 package authorizers
 
 import (
-	"context"
 	"net/http"
 	"net/url"
 	"testing"
 
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/dadrus/heimdall/internal/app"
 	"github.com/dadrus/heimdall/internal/heimdall"
 	"github.com/dadrus/heimdall/internal/heimdall/mocks"
 	"github.com/dadrus/heimdall/internal/rules/mechanisms/subject"
+	"github.com/dadrus/heimdall/internal/validation"
 	"github.com/dadrus/heimdall/internal/x/testsupport"
 )
 
 func TestCreateCELAuthorizer(t *testing.T) {
 	t.Parallel()
 
-	for _, tc := range []struct {
-		uc     string
-		id     string
+	for uc, tc := range map[string]struct {
 		config []byte
 		assert func(t *testing.T, err error, auth *celAuthorizer)
 	}{
-		{
-			uc: "without configuration",
+		"without configuration": {
 			assert: func(t *testing.T, err error, _ *celAuthorizer) {
 				t.Helper()
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrConfiguration)
-				assert.Contains(t, err.Error(), "'expressions' is a required field")
+				require.ErrorContains(t, err, "'expressions' is a required field")
 			},
 		},
-		{
-			uc:     "without rules",
+		"without rules": {
 			config: []byte(`expressions: []`),
 			assert: func(t *testing.T, err error, _ *celAuthorizer) {
 				t.Helper()
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrConfiguration)
-				assert.Contains(t, err.Error(), "'expressions' must contain more than 0 items")
+				require.ErrorContains(t, err, "'expressions' must contain more than 0 items")
 			},
 		},
-		{
-			uc: "with malformed expressions",
+		"with malformed expressions": {
 			config: []byte(`
 expressions: 
   - expression: "foo()"
@@ -72,11 +69,10 @@ expressions:
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrConfiguration)
-				assert.Contains(t, err.Error(), "failed to compile")
+				require.ErrorContains(t, err, "failed to compile")
 			},
 		},
-		{
-			uc: "with expression, which doesn't return bool value",
+		"with expression, which doesn't return bool value": {
 			config: []byte(`
 expressions: 
   - expression: "size(Subject.ID)"
@@ -86,11 +82,10 @@ expressions:
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrConfiguration)
-				assert.Contains(t, err.Error(), "wanted bool")
+				require.ErrorContains(t, err, "wanted bool")
 			},
 		},
-		{
-			uc: "with unsupported attributes",
+		"with unsupported attributes": {
 			config: []byte(`
 expressions:
   - expression: "has(Subject.ID)"
@@ -102,11 +97,10 @@ foo: bar
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrConfiguration)
-				assert.Contains(t, err.Error(), "failed decoding")
+				require.ErrorContains(t, err, "failed decoding")
 			},
 		},
-		{
-			uc: "with expression list without expression value",
+		"with expression list without expression value": {
 			config: []byte(`
 expressions:
   - message: bar
@@ -116,12 +110,10 @@ expressions:
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrConfiguration)
-				assert.Contains(t, err.Error(), "'expressions'[0].'expression' is a required field")
+				require.ErrorContains(t, err, "'expressions'[0].'expression' is a required field")
 			},
 		},
-		{
-			uc: "with valid expression",
-			id: "authz",
+		"with minimal valid configuration": {
 			config: []byte(`
 expressions:
   - expression: "has(Subject.ID)"
@@ -131,18 +123,49 @@ expressions:
 				t.Helper()
 
 				require.NoError(t, err)
-				assert.Equal(t, "authz", auth.ID())
+				assert.Equal(t, "with minimal valid configuration", auth.ID())
+				assert.Equal(t, auth.Name(), auth.ID())
+				assert.NotNil(t, auth.celEnv)
 				assert.NotEmpty(t, auth.expressions)
+				assert.Empty(t, auth.v)
+				assert.False(t, auth.ContinueOnError())
+			},
+		},
+		"with full configuration": {
+			config: []byte(`
+values:
+  foo: "{{ .Subject.Attributes.foo }}"
+expressions:
+  - expression: "has(Subject.ID)"
+    message: Subject ID is not present
+`),
+			assert: func(t *testing.T, err error, auth *celAuthorizer) {
+				t.Helper()
+
+				require.NoError(t, err)
+				assert.Equal(t, "with full configuration", auth.ID())
+				assert.Equal(t, auth.Name(), auth.ID())
+				assert.NotNil(t, auth.celEnv)
+				assert.NotEmpty(t, auth.expressions)
+				assert.Len(t, auth.v, 1)
 				assert.False(t, auth.ContinueOnError())
 			},
 		},
 	} {
-		t.Run("case="+tc.uc, func(t *testing.T) {
+		t.Run(uc, func(t *testing.T) {
+			// GIVEN
 			conf, err := testsupport.DecodeTestConfig(tc.config)
 			require.NoError(t, err)
 
+			validator, err := validation.NewValidator()
+			require.NoError(t, err)
+
+			appCtx := app.NewContextMock(t)
+			appCtx.EXPECT().Validator().Maybe().Return(validator)
+			appCtx.EXPECT().Logger().Return(log.Logger)
+
 			// WHEN
-			a, err := newCELAuthorizer(tc.id, conf)
+			a, err := newCELAuthorizer(appCtx, uc, conf)
 
 			// THEN
 			tc.assert(t, err, a)
@@ -153,16 +176,16 @@ expressions:
 func TestCreateCELAuthorizerFromPrototype(t *testing.T) {
 	t.Parallel()
 
-	for _, tc := range []struct {
-		uc              string
-		id              string
+	for uc, tc := range map[string]struct {
 		prototypeConfig []byte
 		config          []byte
+		stepID          string
 		assert          func(t *testing.T, err error, prototype *celAuthorizer, configured *celAuthorizer)
 	}{
-		{
-			uc: "no new configuration provided",
+		"no new configuration and no step id": {
 			prototypeConfig: []byte(`
+values:
+  foo: bar
 expressions: 
   - expression: "Request.URL.Scheme == 'http'"
 `),
@@ -173,24 +196,60 @@ expressions:
 				assert.Equal(t, prototype, configured)
 			},
 		},
-		{
-			uc: "configuration without expressions provided",
+		"no new configuration but step id": {
 			prototypeConfig: []byte(`
+values:
+  foo: bar
 expressions: 
   - expression: "Request.URL.Scheme == 'http'"
 `),
-			config: []byte(``),
+			stepID: "foo",
 			assert: func(t *testing.T, err error, prototype *celAuthorizer, configured *celAuthorizer) {
 				t.Helper()
 
 				require.NoError(t, err)
-				assert.Equal(t, prototype, configured)
+
+				require.NotNil(t, configured)
+				assert.NotEqual(t, prototype, configured)
+				assert.Equal(t, prototype.v, configured.v)
+				assert.Equal(t, prototype.expressions, configured.expressions)
+				assert.Equal(t, prototype.celEnv, configured.celEnv)
+				assert.Equal(t, prototype.Name(), configured.Name())
+				assert.NotEqual(t, prototype.ID(), configured.ID())
+				assert.Equal(t, "foo", configured.ID())
+				assert.Equal(t, prototype.ContinueOnError(), configured.ContinueOnError())
 			},
 		},
-		{
-			uc: "new expressions provided",
-			id: "authz",
+		"new values provided": {
 			prototypeConfig: []byte(`
+values:
+  foo: bar
+expressions: 
+  - expression: "Request.URL.Scheme == 'http'"
+`),
+			config: []byte(`
+values:
+  foo: foo
+`),
+			assert: func(t *testing.T, err error, prototype *celAuthorizer, configured *celAuthorizer) {
+				t.Helper()
+
+				require.NoError(t, err)
+				assert.NotEqual(t, prototype, configured)
+				require.NotNil(t, configured)
+				assert.Equal(t, prototype.expressions, configured.expressions)
+				assert.Equal(t, prototype.celEnv, configured.celEnv)
+				assert.NotEqual(t, prototype.v, configured.v)
+				assert.Len(t, configured.v, 1)
+				assert.Equal(t, "new values provided", configured.ID())
+				assert.False(t, prototype.ContinueOnError())
+				assert.False(t, configured.ContinueOnError())
+			},
+		},
+		"new expressions provided": {
+			prototypeConfig: []byte(`
+values:
+  foo: bar
 expressions: 
   - expression: "Request.URL.Scheme == 'http'"
 `),
@@ -205,28 +264,110 @@ expressions:
 				assert.NotEqual(t, prototype, configured)
 				require.NotNil(t, configured)
 				assert.NotEqual(t, prototype.expressions, configured.expressions)
-				assert.Equal(t, "authz", configured.ID())
+				assert.Equal(t, prototype.celEnv, configured.celEnv)
+				assert.Equal(t, prototype.v, configured.v)
+				assert.Equal(t, "new expressions provided", configured.ID())
 				assert.False(t, prototype.ContinueOnError())
 				assert.False(t, configured.ContinueOnError())
 			},
 		},
+		"new expressions and step id provided": {
+			prototypeConfig: []byte(`
+values:
+  foo: bar
+expressions: 
+  - expression: "Request.URL.Scheme == 'http'"
+`),
+			config: []byte(`
+expressions: 
+  - expression: "Request.Header('X-Foo-Bar') == 'Baz'"
+`),
+			stepID: "foo",
+			assert: func(t *testing.T, err error, prototype *celAuthorizer, configured *celAuthorizer) {
+				t.Helper()
+
+				require.NoError(t, err)
+				assert.NotEqual(t, prototype, configured)
+				require.NotNil(t, configured)
+				assert.NotEqual(t, prototype.expressions, configured.expressions)
+				assert.Equal(t, prototype.celEnv, configured.celEnv)
+				assert.Equal(t, prototype.v, configured.v)
+				assert.Equal(t, "foo", configured.ID())
+				assert.Equal(t, prototype.Name(), configured.Name())
+				assert.NotEqual(t, prototype.ID(), configured.ID())
+				assert.Equal(t, prototype.ContinueOnError(), configured.ContinueOnError())
+			},
+		},
+		"malformed values": {
+			prototypeConfig: []byte(`
+expressions: 
+  - expression: "Request.URL.Scheme == 'http'"
+`),
+			config: []byte(`
+values:
+  foo: "{{ foo.bar }}"
+`),
+			assert: func(t *testing.T, err error, prototype *celAuthorizer, _ *celAuthorizer) {
+				t.Helper()
+
+				require.Error(t, err)
+				require.ErrorIs(t, err, heimdall.ErrConfiguration)
+				require.ErrorContains(t, err, "failed to parse template")
+
+				require.NotNil(t, prototype)
+			},
+		},
+		"malformed expressions": {
+			prototypeConfig: []byte(`
+expressions: 
+  - expression: "Request.URL.Scheme == 'http'"
+`),
+			config: []byte(`
+expressions: 
+  - expression: "foo()"
+`),
+			assert: func(t *testing.T, err error, prototype *celAuthorizer, _ *celAuthorizer) {
+				t.Helper()
+
+				require.Error(t, err)
+				require.ErrorIs(t, err, heimdall.ErrConfiguration)
+				require.ErrorContains(t, err, "failed to compile")
+
+				require.NotNil(t, prototype)
+			},
+		},
 	} {
-		t.Run("case="+tc.uc, func(t *testing.T) {
+		t.Run(uc, func(t *testing.T) {
+			// GIVEN
 			pc, err := testsupport.DecodeTestConfig(tc.prototypeConfig)
 			require.NoError(t, err)
 
 			conf, err := testsupport.DecodeTestConfig(tc.config)
 			require.NoError(t, err)
 
-			prototype, err := newCELAuthorizer(tc.id, pc)
+			validator, err := validation.NewValidator()
+			require.NoError(t, err)
+
+			appCtx := app.NewContextMock(t)
+			appCtx.EXPECT().Validator().Maybe().Return(validator)
+			appCtx.EXPECT().Logger().Return(log.Logger)
+
+			prototype, err := newCELAuthorizer(appCtx, uc, pc)
 			require.NoError(t, err)
 
 			// WHEN
-			auth, err := prototype.WithConfig(conf)
+			auth, err := prototype.WithConfig(tc.stepID, conf)
 
 			// THEN
-			locAuth, ok := auth.(*celAuthorizer)
-			require.True(t, ok)
+			var (
+				locAuth *celAuthorizer
+				ok      bool
+			)
+
+			if err == nil {
+				locAuth, ok = auth.(*celAuthorizer)
+				require.True(t, ok)
+			}
 
 			tc.assert(t, err, prototype, locAuth)
 		})
@@ -236,42 +377,66 @@ expressions:
 func TestCELAuthorizerExecute(t *testing.T) {
 	t.Parallel()
 
-	for _, tc := range []struct {
-		uc                         string
-		id                         string
+	for uc, tc := range map[string]struct {
 		config                     []byte
-		configureContextAndSubject func(t *testing.T, ctx *mocks.ContextMock, sub *subject.Subject)
+		configureContextAndSubject func(t *testing.T, ctx *mocks.RequestContextMock, sub *subject.Subject)
 		assert                     func(t *testing.T, err error)
 	}{
-		{
-			uc: "denied by expression without access to subject and request",
-			id: "authz1",
+		"denied by expression without access to subject and request": {
 			config: []byte(`
 expressions:
   - expression: "true == false"
 `),
-			configureContextAndSubject: func(t *testing.T, ctx *mocks.ContextMock, _ *subject.Subject) {
+			configureContextAndSubject: func(t *testing.T, ctx *mocks.RequestContextMock, _ *subject.Subject) {
 				// nothing is required here
 				t.Helper()
 
 				ctx.EXPECT().Request().Return(nil)
+				ctx.EXPECT().Outputs().Return(nil)
 			},
 			assert: func(t *testing.T, err error) {
 				t.Helper()
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrAuthorization)
-				assert.Contains(t, err.Error(), "expression 1 failed")
+				require.ErrorContains(t, err, "expression 1 failed")
 
 				var identifier interface{ ID() string }
 				require.ErrorAs(t, err, &identifier)
-				assert.Equal(t, "authz1", identifier.ID())
+				assert.Equal(t, "denied by expression without access to subject and request", identifier.ID())
 			},
 		},
-		{
-			uc: "expressions can use subject and request properties",
-			id: "authz2",
+		"failed rendering values": {
 			config: []byte(`
+values:
+  foo: "{{ len .foo }}"
+expressions:
+  - expression: "true == true"
+`),
+			configureContextAndSubject: func(t *testing.T, ctx *mocks.RequestContextMock, _ *subject.Subject) {
+				// nothing is required here
+				t.Helper()
+
+				ctx.EXPECT().Request().Return(nil)
+				ctx.EXPECT().Outputs().Return(nil)
+			},
+			assert: func(t *testing.T, err error) {
+				t.Helper()
+
+				require.Error(t, err)
+				require.ErrorIs(t, err, heimdall.ErrInternal)
+				require.ErrorContains(t, err, "failed to render values")
+
+				var identifier interface{ ID() string }
+				require.ErrorAs(t, err, &identifier)
+				assert.Equal(t, "failed rendering values", identifier.ID())
+			},
+		},
+		"expressions can use subject, request, outputs, and values properties": {
+			config: []byte(`
+values:
+  a: "{{ .Request.URL.Captures.foo }}"
+  b: "{{ .Outputs.foo }}"
 expressions:
   - expression: |
       Subject.Attributes.exists(c, c.startsWith('group'))
@@ -290,11 +455,14 @@ expressions:
   - expression: Request.Cookie("FooCookie") == "barfoo"
   - expression: Request.URL.String() == "http://localhost/test?foo=bar&baz=zab"
   - expression: Request.URL.Path.split("/").last() == "test"
+  - expression: Request.URL.Captures.foo == "bar"
+  - expression: Outputs.foo == "bar"
+  - expression: Subject.ID == Values.a + Values.b
 `),
-			configureContextAndSubject: func(t *testing.T, ctx *mocks.ContextMock, sub *subject.Subject) {
+			configureContextAndSubject: func(t *testing.T, ctx *mocks.RequestContextMock, sub *subject.Subject) {
 				t.Helper()
 
-				sub.ID = "foobar"
+				sub.ID = "barbar"
 				sub.Attributes = map[string]any{
 					"group1": []string{"admin@acme.co", "analyst@acme.co"},
 					"labels": []string{"metadata", "prod", "pii"},
@@ -308,14 +476,19 @@ expressions:
 				ctx.EXPECT().Request().Return(&heimdall.Request{
 					RequestFunctions: reqf,
 					Method:           http.MethodGet,
-					URL: &url.URL{
-						Scheme:   "http",
-						Host:     "localhost",
-						Path:     "/test",
-						RawQuery: "foo=bar&baz=zab",
+					URL: &heimdall.URL{
+						URL: url.URL{
+							Scheme:   "http",
+							Host:     "localhost",
+							Path:     "/test",
+							RawQuery: "foo=bar&baz=zab",
+						},
+						Captures: map[string]string{"foo": "bar"},
 					},
 					ClientIPAddresses: []string{"127.0.0.1", "10.10.10.10"},
 				})
+
+				ctx.EXPECT().Outputs().Return(map[string]any{"foo": "bar"})
 			},
 			assert: func(t *testing.T, err error) {
 				t.Helper()
@@ -324,19 +497,26 @@ expressions:
 			},
 		},
 	} {
-		t.Run("case="+tc.uc, func(t *testing.T) {
+		t.Run(uc, func(t *testing.T) {
 			// GIVEN
 			conf, err := testsupport.DecodeTestConfig(tc.config)
 			require.NoError(t, err)
 
-			ctx := mocks.NewContextMock(t)
-			ctx.EXPECT().AppContext().Return(context.Background())
+			ctx := mocks.NewRequestContextMock(t)
+			ctx.EXPECT().Context().Return(t.Context())
 
 			sub := &subject.Subject{}
 
 			tc.configureContextAndSubject(t, ctx, sub)
 
-			auth, err := newCELAuthorizer(tc.id, conf)
+			validator, err := validation.NewValidator()
+			require.NoError(t, err)
+
+			appCtx := app.NewContextMock(t)
+			appCtx.EXPECT().Validator().Maybe().Return(validator)
+			appCtx.EXPECT().Logger().Return(log.Logger)
+
+			auth, err := newCELAuthorizer(appCtx, uc, conf)
 			require.NoError(t, err)
 
 			// WHEN

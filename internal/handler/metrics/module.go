@@ -27,10 +27,9 @@ import (
 	"github.com/justinas/alice"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/rs/zerolog"
 	"go.uber.org/fx"
 
-	"github.com/dadrus/heimdall/internal/config"
+	"github.com/dadrus/heimdall/internal/app"
 	"github.com/dadrus/heimdall/internal/handler/fxlcm"
 	"github.com/dadrus/heimdall/internal/handler/middleware/http/methodfilter"
 	"github.com/dadrus/heimdall/internal/x/loggeradapter"
@@ -59,7 +58,10 @@ type ErrLoggerFun func(v ...interface{})
 
 func (l ErrLoggerFun) Println(v ...interface{}) { l(v) }
 
-func newLifecycleManager(conf *config.Configuration, logger zerolog.Logger) lifecycleManager {
+func newLifecycleManager(app app.Context) lifecycleManager {
+	conf := app.Config()
+	logger := app.Logger()
+
 	cfg := conf.Metrics
 	exporterNames, _ := os.LookupEnv("OTEL_METRICS_EXPORTER")
 
@@ -90,10 +92,10 @@ func newLifecycleManager(conf *config.Configuration, logger zerolog.Logger) life
 		ServiceAddress: cfg.Address(),
 		Server: &http.Server{
 			Handler:        mux,
-			ReadTimeout:    5 * time.Second,  // nolint: gomnd
-			WriteTimeout:   10 * time.Second, // nolint: gomnd
-			IdleTimeout:    90 * time.Second, // nolint: gomnd
-			MaxHeaderBytes: 4096,             // nolint: gomnd
+			ReadTimeout:    5 * time.Second,  // nolint: mnd
+			WriteTimeout:   10 * time.Second, // nolint: mnd
+			IdleTimeout:    90 * time.Second, // nolint: mnd
+			MaxHeaderBytes: 4096,             // nolint: mnd
 			ErrorLog:       loggeradapter.NewStdLogger(logger),
 		},
 		Logger: logger,

@@ -17,265 +17,278 @@
 package rules
 
 import (
-	"bytes"
 	"context"
-	"net/url"
+	"slices"
 	"sync"
 
-	"github.com/rs/zerolog"
-
 	"github.com/dadrus/heimdall/internal/heimdall"
-	"github.com/dadrus/heimdall/internal/rules/event"
 	"github.com/dadrus/heimdall/internal/rules/rule"
 	"github.com/dadrus/heimdall/internal/x"
 	"github.com/dadrus/heimdall/internal/x/errorchain"
+	"github.com/dadrus/heimdall/internal/x/radixtrie"
 	"github.com/dadrus/heimdall/internal/x/slicex"
 )
 
-func newRepository(
-	queue event.RuleSetChangedEventQueue,
-	ruleFactory rule.Factory,
-	logger zerolog.Logger,
-) *repository {
+type repository struct {
+	dr rule.Rule
+
+	knownRules      []rule.Rule
+	knownRulesMutex sync.Mutex
+
+	index          *radixtrie.Trie[rule.Route]
+	rulesTrieMutex sync.RWMutex
+}
+
+func newRepository(ruleFactory rule.Factory) rule.Repository {
 	return &repository{
 		dr: x.IfThenElseExec(ruleFactory.HasDefaultRule(),
 			func() rule.Rule { return ruleFactory.DefaultRule() },
 			func() rule.Rule { return nil }),
-		logger: logger,
-		queue:  queue,
-		quit:   make(chan bool),
+		index: radixtrie.New[rule.Route](
+			radixtrie.WithValuesConstraints(func(oldValues []rule.Route, newValue rule.Route) bool {
+				// only rules from the same rule set can be placed in one node
+				return len(oldValues) == 0 || oldValues[0].Rule().SrcID() == newValue.Rule().SrcID()
+			}),
+		),
 	}
 }
 
-type repository struct {
-	dr     rule.Rule
-	logger zerolog.Logger
+func (r *repository) FindRule(ctx heimdall.RequestContext) (rule.Rule, error) {
+	request := ctx.Request()
 
-	rules []rule.Rule
-	mutex sync.RWMutex
+	r.rulesTrieMutex.RLock()
+	defer r.rulesTrieMutex.RUnlock()
 
-	queue event.RuleSetChangedEventQueue
-	quit  chan bool
-}
-
-func (r *repository) FindRule(requestURL *url.URL) (rule.Rule, error) {
-	r.mutex.RLock()
-	defer r.mutex.RUnlock()
-
-	for _, rul := range r.rules {
-		if rul.MatchesURL(requestURL) {
-			return rul, nil
+	entry, err := r.index.FindEntry(
+		request.URL.Host,
+		x.IfThenElse(len(request.URL.RawPath) != 0, request.URL.RawPath, request.URL.Path),
+		radixtrie.LookupMatcherFunc[rule.Route](func(route rule.Route, keys, values []string) bool {
+			return route.Matches(ctx, keys, values)
+		}),
+	)
+	if err != nil {
+		if r.dr != nil {
+			return r.dr, nil
 		}
+
+		return nil, errorchain.NewWithMessagef(heimdall.ErrNoRuleFound,
+			"no applicable rule found for %s", request.URL.String())
 	}
 
-	if r.dr != nil {
-		return r.dr, nil
-	}
+	request.URL.Captures = entry.Parameters
 
-	return nil, errorchain.NewWithMessagef(heimdall.ErrNoRuleFound,
-		"no applicable rule found for %s", requestURL.String())
+	return entry.Value.Rule(), nil
 }
 
-func (r *repository) Start(_ context.Context) error {
-	r.logger.Info().Msg("Starting rule definition loader")
+func (r *repository) AddRuleSet(_ context.Context, _ string, rules []rule.Rule) error {
+	r.knownRulesMutex.Lock()
+	defer r.knownRulesMutex.Unlock()
 
-	go r.watchRuleSetChanges()
+	// Check if the rules from the new rule set define more generic routes for
+	// already existing ones. If so, reject them
+
+	// create a trie containing only the new rules
+	tmp := radixtrie.New[rule.Route](
+		radixtrie.WithValuesConstraints(func(oldValues []rule.Route, newValue rule.Route) bool {
+			// only rules from the same rule set can be placed in one node
+			return len(oldValues) == 0 || oldValues[0].Rule().SrcID() == newValue.Rule().SrcID()
+		}))
+	if err := r.addRulesTo(tmp, rules); err != nil {
+		return err
+	}
+
+	// Check if adding existing rules would result in the violation of the constraint, that
+	// more specific and more generic rules must be defined in the same rule set
+	if err := r.addRulesTo(tmp, r.knownRules); err != nil {
+		return err
+	}
+
+	// Try adding the new rules into the existing index now.
+	tmp = r.index.Clone()
+
+	if err := r.addRulesTo(tmp, rules); err != nil {
+		return err
+	}
+
+	r.knownRules = append(r.knownRules, rules...)
+
+	r.rulesTrieMutex.Lock()
+	r.index = tmp
+	r.rulesTrieMutex.Unlock()
 
 	return nil
 }
 
-func (r *repository) Stop(_ context.Context) error {
-	r.logger.Info().Msg("Tearing down rule definition loader")
+func (r *repository) UpdateRuleSet(_ context.Context, srcID string, rules []rule.Rule) error {
+	// create rules
+	r.knownRulesMutex.Lock()
+	defer r.knownRulesMutex.Unlock()
 
-	r.quit <- true
+	// find all rules for the given src id
+	applicable := slicex.Filter(r.knownRules, func(r rule.Rule) bool { return r.SrcID() == srcID })
 
-	close(r.quit)
+	// find new rules, as well as those, which have been changed.
+	toBeAdded := slicex.Filter(rules, func(newRule rule.Rule) bool {
+		ruleIsNew := !slices.ContainsFunc(applicable, func(existingRule rule.Rule) bool {
+			return existingRule.SameAs(newRule)
+		})
+
+		ruleChanged := slices.ContainsFunc(applicable, func(existingRule rule.Rule) bool {
+			return existingRule.SameAs(newRule) && !existingRule.EqualTo(newRule)
+		})
+
+		return ruleIsNew || ruleChanged
+	})
+
+	// find deleted rules, as well as those, which have been changed.
+	toBeDeleted := slicex.Filter(applicable, func(existingRule rule.Rule) bool {
+		ruleGone := !slices.ContainsFunc(rules, func(newRule rule.Rule) bool {
+			return newRule.SameAs(existingRule)
+		})
+
+		ruleChanged := slices.ContainsFunc(rules, func(newRule rule.Rule) bool {
+			return newRule.SameAs(existingRule) && !newRule.EqualTo(existingRule)
+		})
+
+		return ruleGone || ruleChanged
+	})
+
+	// prepare the new set of known rules, which does not contain the rules, which are gone
+	// with the update
+	knownRules := slices.DeleteFunc(slices.Clone(r.knownRules), func(loaded rule.Rule) bool {
+		return slices.Contains(toBeDeleted, loaded)
+	})
+
+	// Check if the to be added rules define more generic routes for already existing ones.
+	// If so, reject them
+
+	// create a trie containing only the new rules
+	tmp := radixtrie.New[rule.Route](
+		radixtrie.WithValuesConstraints(func(oldValues []rule.Route, newValue rule.Route) bool {
+			// only rules from the same rule set can be placed in one node
+			return len(oldValues) == 0 || oldValues[0].Rule().SrcID() == newValue.Rule().SrcID()
+		}))
+	if err := r.addRulesTo(tmp, toBeAdded); err != nil {
+		return err
+	}
+
+	// Check if adding existing rules would result in the violation of the constraint, that
+	// more specific and more generic rules must be defined in the same rule set
+	if err := r.addRulesTo(tmp, knownRules); err != nil {
+		return err
+	}
+
+	// Try updating the existing index now.
+	tmp = r.index.Clone()
+
+	// delete rules
+	if err := r.removeRulesFrom(tmp, toBeDeleted); err != nil {
+		return err
+	}
+
+	// add rules
+	if err := r.addRulesTo(tmp, toBeAdded); err != nil {
+		return err
+	}
+
+	knownRules = append(knownRules, toBeAdded...)
+	r.knownRules = knownRules
+
+	r.rulesTrieMutex.Lock()
+	r.index = tmp
+	r.rulesTrieMutex.Unlock()
 
 	return nil
 }
 
-func (r *repository) watchRuleSetChanges() {
-	for {
-		select {
-		case evt, ok := <-r.queue:
-			if !ok {
-				r.logger.Debug().Msg("Rule set definition queue closed")
-			}
-
-			switch evt.ChangeType {
-			case event.Create:
-				r.addRuleSet(evt.Source, evt.Rules)
-			case event.Update:
-				r.updateRuleSet(evt.Source, evt.Rules)
-			case event.Remove:
-				r.deleteRuleSet(evt.Source)
-			}
-		case <-r.quit:
-			r.logger.Info().Msg("Rule definition loader stopped")
-
-			return
-		}
-	}
-}
-
-func (r *repository) addRuleSet(srcID string, rules []rule.Rule) {
-	// create rules
-	r.logger.Info().Str("_src", srcID).Msg("Adding rule set")
-
-	r.mutex.Lock()
-	defer r.mutex.Unlock()
-
-	// add them
-	r.addRules(rules)
-}
-
-func (r *repository) updateRuleSet(srcID string, rules []rule.Rule) {
-	// create rules
-	r.logger.Info().Str("_src", srcID).Msg("Updating rule set")
+func (r *repository) DeleteRuleSet(_ context.Context, srcID string) error {
+	r.knownRulesMutex.Lock()
+	defer r.knownRulesMutex.Unlock()
 
 	// find all rules for the given src id
-	applicable := func() []rule.Rule {
-		r.mutex.Lock()
-		defer r.mutex.Unlock()
+	applicable := slicex.Filter(r.knownRules, func(r rule.Rule) bool { return r.SrcID() == srcID })
 
-		return slicex.Filter(r.rules, func(r rule.Rule) bool { return r.SrcID() == srcID })
-	}()
-
-	// find new rules
-	newRules := slicex.Filter(rules, func(r rule.Rule) bool {
-		var known bool
-
-		for _, existing := range applicable {
-			if existing.ID() == r.ID() {
-				known = true
-
-				break
-			}
-		}
-
-		return !known
-	})
-
-	// find updated rules
-	updatedRules := slicex.Filter(rules, func(r rule.Rule) bool {
-		loaded := r.(*ruleImpl) // nolint: forcetypeassert
-
-		var updated bool
-
-		for _, existing := range applicable {
-			known := existing.(*ruleImpl) // nolint: forcetypeassert
-
-			if known.id == loaded.id && !bytes.Equal(known.hash, loaded.hash) {
-				updated = true
-
-				break
-			}
-		}
-
-		return updated
-	})
-
-	// find deleted rules
-	deletedRules := slicex.Filter(applicable, func(r rule.Rule) bool {
-		var present bool
-
-		for _, loaded := range rules {
-			if loaded.ID() == r.ID() {
-				present = true
-
-				break
-			}
-		}
-
-		return !present
-	})
-
-	func() {
-		r.mutex.Lock()
-		defer r.mutex.Unlock()
-
-		// remove deleted rules
-		r.removeRules(deletedRules)
-
-		// replace updated rules
-		r.replaceRules(updatedRules)
-
-		// add new rules
-		r.addRules(newRules)
-	}()
-}
-
-func (r *repository) deleteRuleSet(srcID string) {
-	r.logger.Info().Str("_src", srcID).Msg("Deleting rule set")
-
-	r.mutex.Lock()
-	defer r.mutex.Unlock()
-
-	// find all rules for the given src id
-	applicable := slicex.Filter(r.rules, func(r rule.Rule) bool { return r.SrcID() == srcID })
+	tmp := r.index.Clone()
 
 	// remove them
-	r.removeRules(applicable)
+	if err := r.removeRulesFrom(tmp, applicable); err != nil {
+		return err
+	}
+
+	r.knownRules = slices.DeleteFunc(r.knownRules, func(r rule.Rule) bool {
+		return slices.Contains(applicable, r)
+	})
+
+	r.rulesTrieMutex.Lock()
+	r.index = tmp
+	r.rulesTrieMutex.Unlock()
+
+	return nil
 }
 
-func (r *repository) addRules(rules []rule.Rule) {
+func (r *repository) addRulesTo(trie *radixtrie.Trie[rule.Route], rules []rule.Rule) error {
 	for _, rul := range rules {
-		r.rules = append(r.rules, rul)
+		for _, route := range rul.Routes() {
+			srcID := rul.SrcID()
+			path := route.Path()
+			host := route.Host()
 
-		r.logger.Debug().Str("_src", rul.SrcID()).Str("_id", rul.ID()).Msg("Rule added")
-	}
-}
+			entry, _ := trie.FindEntry(
+				host,
+				path,
+				radixtrie.LookupMatcherFunc[rule.Route](func(route rule.Route, _, _ []string) bool {
+					return route.Rule().SrcID() != srcID
+				}),
+			)
+			if entry != nil {
+				return errorchain.NewWithMessagef(heimdall.ErrConfiguration,
+					"conflicting rules: %s from %s and %s from %s",
+					rul.ID(), srcID, entry.Value.Rule().ID(), entry.Value.Rule().SrcID())
+			}
 
-func (r *repository) removeRules(rules []rule.Rule) {
-	// find all indexes for affected rules
-	var idxs []int
+			nodes, _ := trie.Lookup(host, "", radixtrie.WithWildcardMatch[rule.Route]())
+			for _, node := range nodes {
+				entry, _ = node.FindEntry(
+					"",
+					path,
+					radixtrie.LookupMatcherFunc[rule.Route](func(route rule.Route, _, _ []string) bool {
+						return route.Rule().SrcID() != srcID
+					}),
+				)
+				if entry != nil {
+					return errorchain.NewWithMessagef(heimdall.ErrConfiguration,
+						"conflicting rules: %s from %s and %s from %s",
+						rul.ID(), srcID, entry.Value.Rule().ID(), entry.Value.Rule().SrcID())
+				}
+			}
 
-	for idx, rul := range r.rules {
-		for _, tbd := range rules {
-			if rul.SrcID() == tbd.SrcID() && rul.ID() == tbd.ID() {
-				idxs = append(idxs, idx)
-
-				r.logger.Debug().Str("_src", rul.SrcID()).Str("_id", rul.ID()).Msg("Rule removed")
+			if err := trie.Add(host, path, route); err != nil {
+				return errorchain.NewWithMessagef(heimdall.ErrInternal,
+					"failed adding rule %s from %s", rul.ID(), srcID).
+					CausedBy(err)
 			}
 		}
 	}
 
-	// if all rules should be dropped, just create a new slice
-	if len(idxs) == len(r.rules) {
-		r.rules = nil
-
-		return
-	}
-
-	// move the elements from the end of the rules slice to the found positions
-	// and set the corresponding "emptied" values to nil
-	for i, idx := range idxs {
-		tailIdx := len(r.rules) - (1 + i)
-
-		r.rules[idx] = r.rules[tailIdx]
-
-		// the below re-slice preserves the capacity of the slice.
-		// this is required to avoid memory leaks
-		r.rules[tailIdx] = nil
-	}
-
-	// re-slice
-	r.rules = r.rules[:len(r.rules)-len(idxs)]
+	return nil
 }
 
-func (r *repository) replaceRules(rules []rule.Rule) {
-	for _, updated := range rules {
-		for idx, existing := range r.rules {
-			if updated.SrcID() == existing.SrcID() && existing.ID() == updated.ID() {
-				r.rules[idx] = updated
-
-				r.logger.Debug().
-					Str("_src", existing.SrcID()).
-					Str("_id", existing.ID()).
-					Msg("Rule updated")
-
-				break
+func (r *repository) removeRulesFrom(trie *radixtrie.Trie[rule.Route], tbdRules []rule.Rule) error {
+	for _, rul := range tbdRules {
+		for _, route := range rul.Routes() {
+			if err := trie.Delete(
+				route.Host(),
+				route.Path(),
+				radixtrie.ValueMatcherFunc[rule.Route](func(route rule.Route) bool {
+					return route.Rule().SameAs(rul)
+				}),
+			); err != nil {
+				return errorchain.NewWithMessagef(heimdall.ErrInternal,
+					"failed deleting rule %s from %s", rul.ID(), rul.SrcID()).
+					CausedBy(err)
 			}
 		}
 	}
+
+	return nil
 }

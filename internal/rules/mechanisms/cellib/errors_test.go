@@ -26,11 +26,13 @@ import (
 	"github.com/dadrus/heimdall/internal/x/errorchain"
 )
 
-type idProvider struct {
-	id string
+type errorProvider struct {
+	id   string
+	name string
 }
 
-func (i idProvider) ID() string { return i.id }
+func (ep errorProvider) ID() string   { return ep.id }
+func (ep errorProvider) Name() string { return ep.name }
 
 func TestErrors(t *testing.T) {
 	t.Parallel()
@@ -40,26 +42,25 @@ func TestErrors(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	for _, tc := range []struct {
-		expr string
-	}{
-		{expr: `type(Error) == authorization_error`},
-		{expr: `authorization_error == type(Error)`},
-		{expr: `authorization_error != Error`},
-		{expr: `Error != authorization_error`},
-		{expr: `type(Error) == authentication_error`},
-		{expr: `type(Error) == internal_error`},
-		{expr: `type(Error) in [internal_error, authorization_error, authentication_error]`},
-		{expr: `type(Error) != precondition_error`},
-		{expr: `precondition_error != type(Error)`},
-		{expr: `type(Error) != communication_error`},
-		{expr: `internal_error == internal_error`},
-		{expr: `Error.Source == "test"`},
-		{expr: `Error == Error`},
-		{expr: `type(communication_error) != type(Error)`},
+	for _, tc := range []string{
+		`type(Error) == authorization_error`,
+		`authorization_error == type(Error)`,
+		`authorization_error != Error`,
+		`Error != authorization_error`,
+		`type(Error) == authentication_error`,
+		`type(Error) == internal_error`,
+		`type(Error) in [internal_error, authorization_error, authentication_error]`,
+		`type(Error) != precondition_error`,
+		`precondition_error != type(Error)`,
+		`type(Error) != communication_error`,
+		`internal_error == internal_error`,
+		`Error.Source == "test"`,
+		`Error.StepID == "foo"`,
+		`Error == Error`,
+		`type(communication_error) != type(Error)`,
 	} {
-		t.Run(tc.expr, func(t *testing.T) {
-			ast, iss := env.Compile(tc.expr)
+		t.Run(tc, func(t *testing.T) {
+			ast, iss := env.Compile(tc)
 			if iss != nil {
 				require.NoError(t, iss.Err())
 			}
@@ -76,7 +77,7 @@ func TestErrors(t *testing.T) {
 				CausedBy(errorchain.New(heimdall.ErrAuthentication)).
 				CausedBy(errorchain.New(heimdall.ErrConfiguration)).
 				CausedBy(errorchain.New(heimdall.ErrInternal)).
-				WithErrorContext(idProvider{id: "test"})
+				WithErrorContext(errorProvider{name: "test", id: "foo"})
 
 			out, _, err := prg.Eval(map[string]any{"Error": WrapError(causeErr)})
 			require.NoError(t, err)
@@ -88,20 +89,21 @@ func TestErrors(t *testing.T) {
 func TestWrapError(t *testing.T) {
 	t.Parallel()
 
-	for _, tc := range []struct {
-		uc  string
-		err error
-		id  string
+	for uc, tc := range map[string]struct {
+		err  error
+		name string
+		id   string
 	}{
-		{"no source", heimdall.ErrArgument, ""},
-		{"with source", errorchain.New(heimdall.ErrAuthorization).WithErrorContext(idProvider{id: "test"}), "test"},
+		"no source":   {err: heimdall.ErrArgument},
+		"with source": {err: errorchain.New(heimdall.ErrAuthorization).WithErrorContext(errorProvider{name: "test", id: "foo"}), name: "test", id: "foo"},
 	} {
-		t.Run("", func(t *testing.T) {
+		t.Run(uc, func(t *testing.T) {
 			// WHEN
 			wrapped := WrapError(tc.err)
 
 			// THEN
-			require.Equal(t, tc.id, wrapped.Source)
+			require.Equal(t, tc.name, wrapped.Source)
+			require.Equal(t, tc.id, wrapped.StepID)
 			require.Equal(t, wrapped.errType.current, tc.err)
 			require.Empty(t, wrapped.errType.types)
 		})

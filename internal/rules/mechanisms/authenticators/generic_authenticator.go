@@ -28,6 +28,7 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"github.com/dadrus/heimdall/internal/app"
 	"github.com/dadrus/heimdall/internal/cache"
 	"github.com/dadrus/heimdall/internal/heimdall"
 	"github.com/dadrus/heimdall/internal/rules/endpoint"
@@ -44,31 +45,38 @@ import (
 //nolint:gochecknoinits
 func init() {
 	registerTypeFactory(
-		func(id string, typ string, conf map[string]any) (bool, Authenticator, error) {
+		func(app app.Context, name string, typ string, conf map[string]any) (bool, Authenticator, error) {
 			if typ != AuthenticatorGeneric {
 				return false, nil, nil
 			}
 
-			auth, err := newGenericAuthenticator(id, conf)
+			auth, err := newGenericAuthenticator(app, name, conf)
 
 			return true, auth, err
 		})
 }
 
 type genericAuthenticator struct {
-	id                   string
-	e                    endpoint.Endpoint
-	ads                  extractors.AuthDataExtractStrategy
-	payload              template.Template
-	fwdHeaders           []string
-	fwdCookies           []string
-	sf                   SubjectFactory
-	ttl                  time.Duration
-	sessionLifespanConf  *SessionLifespanConfig
-	allowFallbackOnError bool
+	name                string
+	id                  string
+	app                 app.Context
+	e                   endpoint.Endpoint
+	ads                 extractors.AuthDataExtractStrategy
+	payload             template.Template
+	fwdHeaders          []string
+	fwdCookies          []string
+	sf                  SubjectFactory
+	ttl                 time.Duration
+	sessionLifespanConf *SessionLifespanConfig
 }
 
-func newGenericAuthenticator(id string, rawConfig map[string]any) (*genericAuthenticator, error) {
+func newGenericAuthenticator(app app.Context, name string, rawConfig map[string]any) (*genericAuthenticator, error) {
+	logger := app.Logger()
+	logger.Info().
+		Str("_type", AuthenticatorGeneric).
+		Str("_name", name).
+		Msg("Creating authenticator")
+
 	type Config struct {
 		Endpoint              endpoint.Endpoint                   `mapstructure:"identity_info_endpoint"     validate:"required"` //nolint:lll
 		SubjectInfo           SubjectInfo                         `mapstructure:"subject"                    validate:"required"` //nolint:lll
@@ -78,16 +86,25 @@ func newGenericAuthenticator(id string, rawConfig map[string]any) (*genericAuthe
 		Payload               template.Template                   `mapstructure:"payload"`
 		SessionLifespanConfig *SessionLifespanConfig              `mapstructure:"session_lifespan"`
 		CacheTTL              *time.Duration                      `mapstructure:"cache_ttl"`
-		AllowFallbackOnError  bool                                `mapstructure:"allow_fallback_on_error"`
 	}
 
 	var conf Config
-	if err := decodeConfig(AuthenticatorGeneric, rawConfig, &conf); err != nil {
-		return nil, err
+	if err := decodeConfig(app, rawConfig, &conf); err != nil {
+		return nil, errorchain.NewWithMessagef(heimdall.ErrConfiguration,
+			"failed decoding config for generic authenticator '%s'", name).CausedBy(err)
+	}
+
+	if strings.HasPrefix(conf.Endpoint.URL, "http://") {
+		logger.Warn().
+			Str("_type", AuthenticatorGeneric).
+			Str("_name", name).
+			Msg("No TLS configured for the endpoint used in authenticator")
 	}
 
 	return &genericAuthenticator{
-		id:         id,
+		name:       name,
+		id:         name,
+		app:        app,
 		e:          conf.Endpoint,
 		ads:        conf.AuthDataSource,
 		payload:    conf.Payload,
@@ -97,14 +114,17 @@ func newGenericAuthenticator(id string, rawConfig map[string]any) (*genericAuthe
 		ttl: x.IfThenElseExec(conf.CacheTTL != nil,
 			func() time.Duration { return *conf.CacheTTL },
 			func() time.Duration { return 0 }),
-		allowFallbackOnError: conf.AllowFallbackOnError,
-		sessionLifespanConf:  conf.SessionLifespanConfig,
+		sessionLifespanConf: conf.SessionLifespanConfig,
 	}, nil
 }
 
-func (a *genericAuthenticator) Execute(ctx heimdall.Context) (*subject.Subject, error) {
-	logger := zerolog.Ctx(ctx.AppContext())
-	logger.Debug().Str("_id", a.id).Msg("Authenticating using generic authenticator")
+func (a *genericAuthenticator) Execute(ctx heimdall.RequestContext) (*subject.Subject, error) {
+	logger := zerolog.Ctx(ctx.Context())
+	logger.Debug().
+		Str("_type", AuthenticatorGeneric).
+		Str("_name", a.name).
+		Str("_id", a.id).
+		Msg("Executing authenticator")
 
 	authData, err := a.ads.GetAuthData(ctx)
 	if err != nil {
@@ -130,24 +150,33 @@ func (a *genericAuthenticator) Execute(ctx heimdall.Context) (*subject.Subject, 
 	return sub, nil
 }
 
-func (a *genericAuthenticator) WithConfig(config map[string]any) (Authenticator, error) {
+func (a *genericAuthenticator) WithConfig(stepID string, rawConfig map[string]any) (Authenticator, error) {
 	// this authenticator allows ttl to be redefined on the rule level
-	if len(config) == 0 {
+	if len(stepID) == 0 && len(rawConfig) == 0 {
 		return a, nil
 	}
 
+	if len(rawConfig) == 0 {
+		auth := *a
+		auth.id = stepID
+
+		return &auth, nil
+	}
+
 	type Config struct {
-		CacheTTL             *time.Duration `mapstructure:"cache_ttl"`
-		AllowFallbackOnError *bool          `mapstructure:"allow_fallback_on_error"`
+		CacheTTL *time.Duration `mapstructure:"cache_ttl"`
 	}
 
 	var conf Config
-	if err := decodeConfig(AuthenticatorGeneric, config, &conf); err != nil {
-		return nil, err
+	if err := decodeConfig(a.app, rawConfig, &conf); err != nil {
+		return nil, errorchain.NewWithMessagef(heimdall.ErrConfiguration,
+			"failed decoding config for generic authenticator '%s'", a.name).CausedBy(err)
 	}
 
 	return &genericAuthenticator{
-		id:         a.id,
+		name:       a.name,
+		id:         x.IfThenElse(len(stepID) == 0, a.id, stepID),
+		app:        a.app,
 		e:          a.e,
 		sf:         a.sf,
 		ads:        a.ads,
@@ -157,24 +186,19 @@ func (a *genericAuthenticator) WithConfig(config map[string]any) (Authenticator,
 		ttl: x.IfThenElseExec(conf.CacheTTL != nil,
 			func() time.Duration { return *conf.CacheTTL },
 			func() time.Duration { return a.ttl }),
-		allowFallbackOnError: x.IfThenElseExec(conf.AllowFallbackOnError != nil,
-			func() bool { return *conf.AllowFallbackOnError },
-			func() bool { return a.allowFallbackOnError }),
 		sessionLifespanConf: a.sessionLifespanConf,
 	}, nil
 }
 
-func (a *genericAuthenticator) IsFallbackOnErrorAllowed() bool {
-	return a.allowFallbackOnError
-}
+func (a *genericAuthenticator) Name() string { return a.name }
 
-func (a *genericAuthenticator) ID() string {
-	return a.id
-}
+func (a *genericAuthenticator) ID() string { return a.id }
 
-func (a *genericAuthenticator) getSubjectInformation(ctx heimdall.Context, authData string) ([]byte, error) {
-	logger := zerolog.Ctx(ctx.AppContext())
-	cch := cache.Ctx(ctx.AppContext())
+func (a *genericAuthenticator) IsInsecure() bool { return false }
+
+func (a *genericAuthenticator) getSubjectInformation(ctx heimdall.RequestContext, authData string) ([]byte, error) {
+	logger := zerolog.Ctx(ctx.Context())
+	cch := cache.Ctx(ctx.Context())
 
 	var (
 		cacheKey string
@@ -183,7 +207,7 @@ func (a *genericAuthenticator) getSubjectInformation(ctx heimdall.Context, authD
 
 	if a.ttl > 0 {
 		cacheKey = a.calculateCacheKey(authData)
-		if entry, err := cch.Get(ctx.AppContext(), cacheKey); err == nil {
+		if entry, err := cch.Get(ctx.Context(), cacheKey); err == nil {
 			logger.Debug().Msg("Reusing subject information from cache")
 
 			return entry, nil
@@ -209,7 +233,7 @@ func (a *genericAuthenticator) getSubjectInformation(ctx heimdall.Context, authD
 	}
 
 	if cacheTTL := a.getCacheTTL(session); cacheTTL > 0 {
-		if err = cch.Set(ctx.AppContext(), cacheKey, payload, cacheTTL); err != nil {
+		if err = cch.Set(ctx.Context(), cacheKey, payload, cacheTTL); err != nil {
 			logger.Warn().Err(err).Msg("Failed to cache subject information")
 		}
 	}
@@ -217,7 +241,7 @@ func (a *genericAuthenticator) getSubjectInformation(ctx heimdall.Context, authD
 	return payload, nil
 }
 
-func (a *genericAuthenticator) fetchSubjectInformation(ctx heimdall.Context, authData string) ([]byte, error) {
+func (a *genericAuthenticator) fetchSubjectInformation(ctx heimdall.RequestContext, authData string) ([]byte, error) {
 	req, err := a.createRequest(ctx, authData)
 	if err != nil {
 		return nil, err
@@ -246,8 +270,8 @@ func (a *genericAuthenticator) fetchSubjectInformation(ctx heimdall.Context, aut
 	return a.readResponse(resp)
 }
 
-func (a *genericAuthenticator) createRequest(ctx heimdall.Context, authData string) (*http.Request, error) {
-	logger := zerolog.Ctx(ctx.AppContext())
+func (a *genericAuthenticator) createRequest(ctx heimdall.RequestContext, authData string) (*http.Request, error) {
+	logger := zerolog.Ctx(ctx.Context())
 
 	var body io.Reader
 
@@ -266,7 +290,7 @@ func (a *genericAuthenticator) createRequest(ctx heimdall.Context, authData stri
 		body = strings.NewReader(value)
 	}
 
-	req, err := a.e.CreateRequest(ctx.AppContext(), body,
+	req, err := a.e.CreateRequest(ctx.Context(), body,
 		endpoint.RenderFunc(func(value string) (string, error) {
 			tpl, err := template.New(value)
 			if err != nil {
@@ -287,7 +311,8 @@ func (a *genericAuthenticator) createRequest(ctx heimdall.Context, authData stri
 	for _, headerName := range a.fwdHeaders {
 		headerValue := ctx.Request().Header(headerName)
 		if len(headerValue) == 0 {
-			logger.Warn().Str("_header", headerName).
+			logger.Warn().
+				Str("_header", headerName).
 				Msg("Header not present in the request but configured to be forwarded")
 		} else {
 			req.Header.Add(headerName, headerValue)
@@ -297,7 +322,8 @@ func (a *genericAuthenticator) createRequest(ctx heimdall.Context, authData stri
 	for _, cookieName := range a.fwdCookies {
 		cookieValue := ctx.Request().Cookie(cookieName)
 		if len(cookieValue) == 0 {
-			logger.Warn().Str("_cookie", cookieName).
+			logger.Warn().
+				Str("_cookie", cookieName).
 				Msg("Cookie not present in the request but configured to be forwarded")
 		} else {
 			req.AddCookie(&http.Cookie{Name: cookieName, Value: cookieValue})
@@ -308,7 +334,7 @@ func (a *genericAuthenticator) createRequest(ctx heimdall.Context, authData stri
 }
 
 func (a *genericAuthenticator) readResponse(resp *http.Response) ([]byte, error) {
-	if !(resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices) {
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return nil, errorchain.NewWithMessagef(heimdall.ErrCommunication,
 			"unexpected response code: %v", resp.StatusCode).WithErrorContext(a)
 	}

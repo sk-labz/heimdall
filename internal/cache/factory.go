@@ -16,14 +16,14 @@
 
 package cache
 
-import "github.com/dadrus/heimdall/internal/watcher"
+import "github.com/dadrus/heimdall/internal/app"
 
 type Factory interface {
-	Create(conf map[string]any, cw watcher.Watcher) (Cache, error)
+	Create(app app.Context, conf map[string]any) (Cache, error)
 }
 
-type FactoryFunc func(conf map[string]any, cw watcher.Watcher) (Cache, error)
+type FactoryFunc func(app app.Context, conf map[string]any) (Cache, error)
 
-func (f FactoryFunc) Create(conf map[string]any, cw watcher.Watcher) (Cache, error) {
-	return f(conf, cw)
+func (f FactoryFunc) Create(app app.Context, conf map[string]any) (Cache, error) {
+	return f(app, conf)
 }

@@ -20,8 +20,8 @@ import (
 	"errors"
 	"sync"
 
+	"github.com/dadrus/heimdall/internal/app"
 	"github.com/dadrus/heimdall/internal/cache/noop"
-	"github.com/dadrus/heimdall/internal/watcher"
 	"github.com/dadrus/heimdall/internal/x/errorchain"
 )
 
@@ -44,18 +44,18 @@ func Register(typ string, factory Factory) {
 	factories[typ] = factory
 }
 
-func Create(typ string, config map[string]any, cw watcher.Watcher) (Cache, error) {
+func Create(ctx app.Context, typ string, config map[string]any) (Cache, error) {
 	if typ == "noop" {
 		return &noop.Cache{}, nil
 	}
 
 	factoriesMu.RLock()
-	factory, ok := factories[typ]
-	factoriesMu.RUnlock()
+	factory, ok := factories[typ] // nolint: wsl_v5
+	factoriesMu.RUnlock()         // nolint: wsl_v5
 
 	if !ok {
 		return nil, errorchain.NewWithMessagef(ErrUnsupportedCacheType, "'%s'", typ)
 	}
 
-	return factory.Create(config, cw)
+	return factory.Create(ctx, config)
 }

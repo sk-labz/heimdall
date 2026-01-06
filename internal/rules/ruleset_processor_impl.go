@@ -1,4 +1,4 @@
-// Copyright 2023 Dimitrij Drus <dadrus@gmx.de>
+// Copyright 2022-2025 Dimitrij Drus <dadrus@gmx.de>
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,13 +17,14 @@
 package rules
 
 import (
+	"context"
 	"errors"
 
 	"github.com/rs/zerolog"
 
+	config2 "github.com/dadrus/heimdall/internal/config"
 	"github.com/dadrus/heimdall/internal/heimdall"
 	"github.com/dadrus/heimdall/internal/rules/config"
-	"github.com/dadrus/heimdall/internal/rules/event"
 	"github.com/dadrus/heimdall/internal/rules/rule"
 	"github.com/dadrus/heimdall/internal/x/errorchain"
 )
@@ -31,19 +32,78 @@ import (
 var ErrUnsupportedRuleSetVersion = errors.New("unsupported rule set version")
 
 type ruleSetProcessor struct {
-	q event.RuleSetChangedEventQueue
-	f rule.Factory
-	l zerolog.Logger
+	r  rule.Repository
+	f  rule.Factory
+	op config2.OperationMode
 }
 
-func NewRuleSetProcessor(
-	queue event.RuleSetChangedEventQueue, factory rule.Factory, logger zerolog.Logger,
-) rule.SetProcessor {
+func NewRuleSetProcessor(repository rule.Repository, factory rule.Factory, op config2.OperationMode) rule.SetProcessor {
 	return &ruleSetProcessor{
-		q: queue,
-		f: factory,
-		l: logger,
+		r:  repository,
+		f:  factory,
+		op: op,
 	}
+}
+
+func (p *ruleSetProcessor) OnCreated(ctx context.Context, ruleSet *config.RuleSet) error {
+	logger := zerolog.Ctx(ctx)
+	logger.Info().Str("_rule_set", ruleSet.Name).Msg("New rule set received")
+
+	if !p.isVersionSupported(ruleSet.Version) {
+		return errorchain.NewWithMessage(ErrUnsupportedRuleSetVersion, ruleSet.Version)
+	}
+
+	rules, err := p.loadRules(ruleSet)
+	if err != nil {
+		return err
+	}
+
+	if p.op == config2.ProxyMode {
+		for _, rul := range ruleSet.Rules {
+			if rul.Backend.IsInsecure() {
+				logger.Warn().
+					Str("_rule_set", ruleSet.Name).
+					Str("_rule", rul.ID).
+					Msg("Rule contains insecure forward_to configuration")
+			}
+		}
+	}
+
+	return p.r.AddRuleSet(ctx, ruleSet.Source, rules)
+}
+
+func (p *ruleSetProcessor) OnUpdated(ctx context.Context, ruleSet *config.RuleSet) error {
+	logger := zerolog.Ctx(ctx)
+	logger.Info().Str("_rule_set", ruleSet.Name).Msg("Update of a rule set received")
+
+	if !p.isVersionSupported(ruleSet.Version) {
+		return errorchain.NewWithMessage(ErrUnsupportedRuleSetVersion, ruleSet.Version)
+	}
+
+	rules, err := p.loadRules(ruleSet)
+	if err != nil {
+		return err
+	}
+
+	if p.op == config2.ProxyMode {
+		for _, rul := range ruleSet.Rules {
+			if rul.Backend.IsInsecure() {
+				logger.Warn().
+					Str("_rule_set", ruleSet.Name).
+					Str("_rule", rul.ID).
+					Msg("Rule contains insecure forward_to configuration")
+			}
+		}
+	}
+
+	return p.r.UpdateRuleSet(ctx, ruleSet.Source, rules)
+}
+
+func (p *ruleSetProcessor) OnDeleted(ctx context.Context, ruleSet *config.RuleSet) error {
+	logger := zerolog.Ctx(ctx)
+	logger.Info().Str("_rule_set", ruleSet.Name).Msg("Deletion of a rule set received")
+
+	return p.r.DeleteRuleSet(ctx, ruleSet.Source)
 }
 
 func (p *ruleSetProcessor) isVersionSupported(version string) bool {
@@ -56,75 +116,12 @@ func (p *ruleSetProcessor) loadRules(ruleSet *config.RuleSet) ([]rule.Rule, erro
 	for idx, rc := range ruleSet.Rules {
 		rul, err := p.f.CreateRule(ruleSet.Version, ruleSet.Source, rc)
 		if err != nil {
-			return nil, errorchain.NewWithMessage(heimdall.ErrInternal, "failed loading rule").CausedBy(err)
+			return nil, errorchain.NewWithMessagef(heimdall.ErrInternal,
+				"loading rule ID='%s' failed", rc.ID).CausedBy(err)
 		}
 
 		rules[idx] = rul
 	}
 
 	return rules, nil
-}
-
-func (p *ruleSetProcessor) OnCreated(ruleSet *config.RuleSet) error {
-	if !p.isVersionSupported(ruleSet.Version) {
-		return errorchain.NewWithMessage(ErrUnsupportedRuleSetVersion, ruleSet.Version)
-	}
-
-	rules, err := p.loadRules(ruleSet)
-	if err != nil {
-		return err
-	}
-
-	evt := event.RuleSetChanged{
-		Source:     ruleSet.Source,
-		Name:       ruleSet.Name,
-		Rules:      rules,
-		ChangeType: event.Create,
-	}
-
-	p.sendEvent(evt)
-
-	return nil
-}
-
-func (p *ruleSetProcessor) OnUpdated(ruleSet *config.RuleSet) error {
-	if !p.isVersionSupported(ruleSet.Version) {
-		return errorchain.NewWithMessage(ErrUnsupportedRuleSetVersion, ruleSet.Version)
-	}
-
-	rules, err := p.loadRules(ruleSet)
-	if err != nil {
-		return err
-	}
-
-	evt := event.RuleSetChanged{
-		Source:     ruleSet.Source,
-		Name:       ruleSet.Name,
-		Rules:      rules,
-		ChangeType: event.Update,
-	}
-
-	p.sendEvent(evt)
-
-	return nil
-}
-
-func (p *ruleSetProcessor) OnDeleted(ruleSet *config.RuleSet) error {
-	evt := event.RuleSetChanged{
-		Source:     ruleSet.Source,
-		Name:       ruleSet.Name,
-		ChangeType: event.Remove,
-	}
-
-	p.sendEvent(evt)
-
-	return nil
-}
-
-func (p *ruleSetProcessor) sendEvent(evt event.RuleSetChanged) {
-	p.l.Info().
-		Str("_src", evt.Source).
-		Str("_type", evt.ChangeType.String()).
-		Msg("Rule set changed")
-	p.q <- evt
 }

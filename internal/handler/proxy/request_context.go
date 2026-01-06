@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -46,8 +47,7 @@ type requestContext struct {
 }
 
 func newContextFactory(
-	signer heimdall.JWTSigner,
-	cfg config.ServiceConfig,
+	cfg config.ServeConfig,
 	tlsCfg *tls.Config,
 ) requestcontext.ContextFactory {
 	transport := &http.Transport{
@@ -56,15 +56,15 @@ func newContextFactory(
 		// is possible per upstream
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second, //nolint:gomnd
-			KeepAlive: 30 * time.Second, //nolint:gomnd
+			Timeout:   30 * time.Second, //nolint:mnd
+			KeepAlive: 30 * time.Second, //nolint:mnd
 		}).DialContext,
 		ResponseHeaderTimeout: cfg.Timeout.Read,
 		MaxIdleConns:          cfg.ConnectionsLimit.MaxIdle,
 		MaxIdleConnsPerHost:   cfg.ConnectionsLimit.MaxIdlePerHost,
 		MaxConnsPerHost:       cfg.ConnectionsLimit.MaxPerHost,
 		IdleConnTimeout:       cfg.Timeout.Idle,
-		TLSHandshakeTimeout:   10 * time.Second, //nolint:gomnd
+		TLSHandshakeTimeout:   10 * time.Second, //nolint:mnd
 		ExpectContinueTimeout: 1 * time.Second,
 		ForceAttemptHTTP2:     true,
 		TLSClientConfig:       tlsCfg,
@@ -72,7 +72,7 @@ func newContextFactory(
 
 	return requestcontext.FactoryFunc(func(rw http.ResponseWriter, req *http.Request) requestcontext.Context {
 		return &requestContext{
-			RequestContext: requestcontext.New(signer, req),
+			RequestContext: requestcontext.New(req),
 			transport:      transport,
 			rw:             rw,
 			req:            req,
@@ -81,7 +81,7 @@ func newContextFactory(
 }
 
 func (r *requestContext) Finalize(upstream rule.Backend) error {
-	logger := zerolog.Ctx(r.AppContext())
+	logger := zerolog.Ctx(r.Context())
 
 	if err := r.PipelineError(); err != nil {
 		return err
@@ -105,7 +105,7 @@ func (r *requestContext) Finalize(upstream rule.Backend) error {
 			errHolder.err = errorchain.NewWithMessage(heimdall.ErrCommunication, "Failed to proxy request").
 				CausedBy(err)
 		},
-		Rewrite: r.rewriteRequest(upstream.URL()),
+		Rewrite: r.rewriteRequest(upstream.URL(), upstream.ForwardHostHeader()),
 		Transport: otelhttp.NewTransport(
 			httpx.NewTraceRoundTripper(r.transport),
 			otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
@@ -119,7 +119,7 @@ func (r *requestContext) Finalize(upstream rule.Backend) error {
 	return errHolder.err
 }
 
-func (r *requestContext) rewriteRequest(targetURL *url.URL) func(req *httputil.ProxyRequest) {
+func (r *requestContext) rewriteRequest(targetURL *url.URL, passHostHeader bool) func(req *httputil.ProxyRequest) {
 	return func(proxyReq *httputil.ProxyRequest) {
 		proxyReq.Out.Method = r.Request().Method
 		proxyReq.Out.URL = targetURL
@@ -130,49 +130,78 @@ func (r *requestContext) rewriteRequest(targetURL *url.URL) func(req *httputil.P
 		proxyReq.Out.Header.Del("X-Forwarded-Uri")
 		proxyReq.Out.Header.Del("X-Forwarded-Path")
 
-		uh := r.UpstreamHeaders()
-		for k := range uh {
-			proxyReq.Out.Header.Set(k, uh.Get(k))
-		}
+		r.addUpstreamHeader(proxyReq.Out)
+		r.addUpstreamCookies(proxyReq.Out)
+		r.rewriteForwardedHeader(proxyReq.In, proxyReq.Out)
 
-		if host := uh.Get("Host"); len(host) != 0 {
+		if host := proxyReq.Out.Header.Get("Host"); len(host) != 0 {
 			proxyReq.Out.Host = host
 			proxyReq.Out.Header.Del("Host")
+		} else if passHostHeader {
+			proxyReq.Out.Host = proxyReq.In.Host
 		}
+	}
+}
 
-		for k, v := range r.UpstreamCookies() {
-			proxyReq.Out.AddCookie(&http.Cookie{Name: k, Value: v})
-		}
+func (r *requestContext) rewriteForwardedHeader(in, out *http.Request) {
+	// set headers, which might be relevant for the upstream, if these are present in the original request
+	// and have not been dropped
+	forwardedHost := in.Header.Get("X-Forwarded-Host")
+	forwardedProto := in.Header.Get("X-Forwarded-Proto")
+	forwardedFor := in.Header.Get("X-Forwarded-For")
+	forwarded := in.Header.Get("Forwarded")
+	proto := x.IfThenElse(in.TLS != nil, "https", "http")
+	clientIP := httpx.IPFromHostPort(in.RemoteAddr)
 
-		// set headers, which might be relevant for the upstream, if these are present in the original request
-		// and have not been dropped
-		forwardedHost := proxyReq.In.Header.Get("X-Forwarded-Host")
-		forwardedProto := proxyReq.In.Header.Get("X-Forwarded-Proto")
-		forwardedFor := proxyReq.In.Header.Get("X-Forwarded-For")
-		forwarded := proxyReq.In.Header.Get("Forwarded")
-		proto := x.IfThenElse(proxyReq.In.TLS != nil, "https", "http")
-		clientIP := httpx.IPFromHostPort(r.req.RemoteAddr)
+	out.Header.Set("X-Forwarded-For", x.IfThenElseExec(len(forwardedFor) == 0,
+		func() string { return clientIP },
+		func() string { return fmt.Sprintf("%s, %s", forwardedFor, clientIP) }))
 
-		if len(forwardedFor) != 0 || len(forwardedProto) != 0 || len(forwardedHost) != 0 {
-			proxyReq.Out.Header.Set("X-Forwarded-For", x.IfThenElseExec(len(forwardedFor) == 0,
-				func() string { return clientIP },
-				func() string { return fmt.Sprintf("%s, %s", forwardedFor, clientIP) }))
+	out.Header.Set("X-Forwarded-Proto",
+		x.IfThenElse(len(forwardedProto) == 0, proto, forwardedProto))
 
-			proxyReq.Out.Header.Set("X-Forwarded-Proto",
-				x.IfThenElse(len(forwardedProto) == 0, proto, forwardedProto))
+	out.Header.Set("X-Forwarded-Host",
+		x.IfThenElse(len(forwardedHost) == 0, in.Host, forwardedHost))
 
-			proxyReq.Out.Header.Set("X-Forwarded-Host",
-				x.IfThenElse(len(forwardedHost) == 0, proxyReq.In.Host, forwardedHost))
-		} else {
-			proxyReq.Out.Header.Set("Forwarded", x.IfThenElseExec(len(forwarded) == 0,
-				func() string {
-					return fmt.Sprintf("for=%s;host=%s;proto=%s",
-						clientIP, proxyReq.In.Host, proto)
-				},
-				func() string {
-					return fmt.Sprintf("%s, for=%s;host=%s;proto=%s",
-						forwarded, clientIP, proxyReq.In.Host, proto)
-				}))
+	out.Header.Set("Forwarded", x.IfThenElseExec(len(forwarded) == 0,
+		func() string {
+			if strings.Contains(clientIP, ":") {
+				// IPv6 must be quoted
+				clientIP = "\"[" + clientIP + "]\""
+			}
+
+			return fmt.Sprintf("for=%s;host=%s;proto=%s",
+				clientIP, in.Host, proto)
+		},
+		func() string {
+			if strings.Contains(clientIP, ":") {
+				// IPv6 must be quoted
+				clientIP = "\"[" + clientIP + "]\""
+			}
+
+			return fmt.Sprintf("%s, for=%s;host=%s;proto=%s",
+				forwarded, clientIP, in.Host, proto)
+		}))
+}
+
+func (r *requestContext) addUpstreamCookies(req *http.Request) {
+	for k, v := range r.UpstreamCookies() {
+		req.AddCookie(&http.Cookie{Name: k, Value: v})
+	}
+}
+
+func (r *requestContext) addUpstreamHeader(req *http.Request) {
+	// delete those headers which are set by heimdall first
+	// we do this to prevent spoofing
+	uh := r.UpstreamHeaders()
+	for name := range uh {
+		req.Header.Del(name)
+	}
+
+	// add them now
+	for name, values := range uh {
+		for _, value := range values {
+			req.Header.Add(name, value)
 		}
 	}
 }

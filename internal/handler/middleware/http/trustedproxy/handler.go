@@ -19,10 +19,12 @@ package trustedproxy
 import (
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/rs/zerolog"
 
+	"github.com/dadrus/heimdall/internal/config"
 	"github.com/dadrus/heimdall/internal/x/httpx"
 )
 
@@ -62,15 +64,22 @@ func New(logger zerolog.Logger, proxies ...string) func(http.Handler) http.Handl
 	var ipHolders []ipHolder
 
 	for _, ipAddr := range proxies {
-		if strings.Contains(ipAddr, "/") {
-			_, ipNet, err := net.ParseCIDR(ipAddr)
-			if err != nil {
-				logger.Warn().Err(err).Msgf("Trusted proxies IP range %q could not be parsed", ipAddr)
-			} else {
-				ipHolders = append(ipHolders, ipNet)
-			}
-		} else {
+		if !strings.Contains(ipAddr, "/") {
 			ipHolders = append(ipHolders, simpleIP(net.ParseIP(ipAddr)))
+
+			continue
+		}
+
+		_, ipNet, err := net.ParseCIDR(ipAddr)
+		if err != nil {
+			logger.Warn().Err(err).
+				Msgf("Trusted proxies entry %q could not be parsed and will be ignored", ipAddr)
+		} else {
+			ipHolders = append(ipHolders, ipNet)
+
+			if slices.Contains(config.InsecureNetworks, ipNet.String()) {
+				logger.Warn().Msgf("Configured trusted proxies contains insecure networks: %s", ipAddr)
+			}
 		}
 	}
 

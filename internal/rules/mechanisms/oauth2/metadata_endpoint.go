@@ -1,3 +1,19 @@
+// Copyright 2022-2025 Dimitrij Drus <dadrus@gmx.de>
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
 package oauth2
 
 import (
@@ -16,28 +32,17 @@ import (
 	"github.com/dadrus/heimdall/internal/x/errorchain"
 )
 
+type ResolvedEndpointSettings struct {
+	Retry        *endpoint.Retry                 `mapstructure:"retry"`
+	AuthStrategy endpoint.AuthenticationStrategy `mapstructure:"auth"`
+	HTTPCache    *endpoint.HTTPCache             `mapstructure:"http_cache"`
+}
+
 type MetadataEndpoint struct {
 	endpoint.Endpoint `mapstructure:",squash"`
 
-	DisableIssuerIdentifierVerification bool `mapstructure:"disable_issuer_identifier_verification"`
-}
-
-func (e *MetadataEndpoint) init() {
-	if e.Headers == nil {
-		e.Headers = make(map[string]string)
-	}
-
-	if _, ok := e.Headers["Accept"]; !ok {
-		e.Headers["Accept"] = "application/json"
-	}
-
-	if len(e.Method) == 0 {
-		e.Method = http.MethodGet
-	}
-
-	if e.HTTPCache == nil {
-		e.HTTPCache = &endpoint.HTTPCache{Enabled: true, DefaultTTL: 30 * time.Minute} //nolint:gomnd
-	}
+	DisableIssuerIdentifierVerification bool                                `mapstructure:"disable_issuer_identifier_verification"` //nolint: lll
+	ResolvedEndpoints                   map[string]ResolvedEndpointSettings `mapstructure:"resolved_endpoints"`
 }
 
 func (e *MetadataEndpoint) Get(ctx context.Context, args map[string]any) (ServerMetadata, error) {
@@ -71,7 +76,7 @@ func (e *MetadataEndpoint) Get(ctx context.Context, args map[string]any) (Server
 
 	defer resp.Body.Close()
 
-	if !(resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices) {
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return ServerMetadata{}, errorchain.
 			NewWithMessagef(heimdall.ErrCommunication, "unexpected response code: %v", resp.StatusCode)
 	}
@@ -88,6 +93,24 @@ func (e *MetadataEndpoint) Get(ctx context.Context, args map[string]any) (Server
 	}
 
 	return sm, nil
+}
+
+func (e *MetadataEndpoint) init() {
+	if e.Headers == nil {
+		e.Headers = make(map[string]string)
+	}
+
+	if _, ok := e.Headers["Accept"]; !ok {
+		e.Headers["Accept"] = "application/json"
+	}
+
+	if len(e.Method) == 0 {
+		e.Method = http.MethodGet
+	}
+
+	if e.HTTPCache == nil {
+		e.HTTPCache = &endpoint.HTTPCache{Enabled: true, DefaultTTL: 30 * time.Minute} //nolint:mnd
+	}
 }
 
 func (e *MetadataEndpoint) decodeResponse(resp *http.Response) (ServerMetadata, error) {
@@ -121,14 +144,19 @@ func (e *MetadataEndpoint) decodeResponse(resp *http.Response) (ServerMetadata, 
 	)
 
 	if len(spec.JWKSEndpointURL) != 0 {
+		epSettings := e.ResolvedEndpoints["jwks_uri"]
 		jwksEP = &endpoint.Endpoint{
-			URL:     spec.JWKSEndpointURL,
-			Method:  http.MethodGet,
-			Headers: map[string]string{"Accept": "application/json"},
+			URL:          spec.JWKSEndpointURL,
+			Method:       http.MethodGet,
+			Headers:      map[string]string{"Accept": "application/json"},
+			AuthStrategy: epSettings.AuthStrategy,
+			Retry:        epSettings.Retry,
+			HTTPCache:    epSettings.HTTPCache,
 		}
 	}
 
 	if len(spec.IntrospectionEndpointURL) != 0 {
+		epSettings := e.ResolvedEndpoints["introspection_endpoint"]
 		introspectionEP = &endpoint.Endpoint{
 			URL:    spec.IntrospectionEndpointURL,
 			Method: http.MethodPost,
@@ -136,6 +164,9 @@ func (e *MetadataEndpoint) decodeResponse(resp *http.Response) (ServerMetadata, 
 				"Content-Type": "application/x-www-form-urlencoded",
 				"Accept":       "application/json",
 			},
+			AuthStrategy: epSettings.AuthStrategy,
+			Retry:        epSettings.Retry,
+			HTTPCache:    epSettings.HTTPCache,
 		}
 	}
 

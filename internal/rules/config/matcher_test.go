@@ -19,86 +19,56 @@ package config
 import (
 	"testing"
 
-	"github.com/goccy/go-json"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
-func TestMatcherUnmarshalJSON(t *testing.T) {
+func TestMatcherDeepCopyInto(t *testing.T) {
 	t.Parallel()
 
-	type Typ struct {
-		Matcher Matcher `json:"match"`
-	}
-
-	for _, tc := range []struct {
-		uc     string
-		config []byte
-		assert func(t *testing.T, err error, matcher *Matcher)
-	}{
-		{
-			uc:     "specified as string",
-			config: []byte(`{ "match": "foo.bar" }`),
-			assert: func(t *testing.T, err error, matcher *Matcher) {
-				t.Helper()
-
-				require.NoError(t, err)
-				assert.Equal(t, "foo.bar", matcher.URL)
-				assert.Equal(t, "glob", matcher.Strategy)
+	for uc, tc := range map[string]*Matcher{
+		"single route defining only a path": {
+			Routes: []Route{{Path: "/foo/bar"}},
+		},
+		"single route defining path and some path parameters": {
+			Routes: []Route{
+				{
+					Path: "/:foo/:bar",
+					PathParams: []ParameterMatcher{
+						{Name: "foo", Value: "bar", Type: "glob"},
+						{Name: "bar", Value: "baz", Type: "regex"},
+					},
+				},
 			},
 		},
-		{
-			uc: "specified as structured type with invalid json structure",
-			config: []byte(`{
-"match": {
-  strategy: foo
-}
-}`),
-			assert: func(t *testing.T, err error, _ *Matcher) {
-				t.Helper()
-
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), "invalid character")
+		"multiple routes and additional constraints": {
+			Routes: []Route{
+				{
+					Path: "/:foo/:bar",
+					PathParams: []ParameterMatcher{
+						{Name: "foo", Value: "bar", Type: "glob"},
+						{Name: "bar", Value: "baz", Type: "regex"},
+					},
+				},
+				{
+					Path: "/some/static/path",
+				},
 			},
-		},
-		{
-			uc: "specified as structured type without url",
-			config: []byte(`{
-"match": {
-  "strategy": "foo"
-}
-}`),
-			assert: func(t *testing.T, err error, _ *Matcher) {
-				t.Helper()
-
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), ErrURLMissing.Error())
+			Scheme: "https",
+			Hosts: []HostMatcher{
+				{
+					Value: "*.example.com",
+					Type:  "wildcard",
+				},
 			},
-		},
-		{
-			uc: "specified as structured type without strategy specified",
-			config: []byte(`{
-"match": {
-  "url": "foo.bar"
-}
-}`),
-			assert: func(t *testing.T, err error, matcher *Matcher) {
-				t.Helper()
-
-				require.NoError(t, err)
-				assert.Equal(t, "foo.bar", matcher.URL)
-				assert.Equal(t, "glob", matcher.Strategy)
-			},
+			Methods: []string{"GET", "POST"},
 		},
 	} {
-		t.Run(tc.uc, func(t *testing.T) {
-			var typ Typ
+		t.Run(uc, func(t *testing.T) {
+			out := new(Matcher)
 
-			// WHEN
-			err := json.Unmarshal(tc.config, &typ)
+			tc.DeepCopyInto(out)
 
-			// THEN
-			tc.assert(t, err, &typ.Matcher)
+			assert.Equal(t, tc, out)
 		})
 	}
 }

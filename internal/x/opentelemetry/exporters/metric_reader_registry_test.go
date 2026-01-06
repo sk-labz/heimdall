@@ -17,7 +17,6 @@
 package exporters
 
 import (
-	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -29,14 +28,12 @@ import (
 )
 
 func TestCreateMetricReaders(t *testing.T) {
-	for _, tc := range []struct {
-		uc     string
+	for uc, tc := range map[string]struct {
 		names  []string
 		setup  func(t *testing.T)
 		assert func(t *testing.T, err error, readers []metric.Reader)
 	}{
-		{
-			uc:    "none exporter is at the beginning of the list",
+		"none exporter is at the beginning of the list": {
 			names: []string{"none", "foobar"},
 			assert: func(t *testing.T, err error, readers []metric.Reader) {
 				t.Helper()
@@ -46,8 +43,7 @@ func TestCreateMetricReaders(t *testing.T) {
 				assert.IsType(t, &metric.PeriodicReader{}, readers[0])
 			},
 		},
-		{
-			uc:    "none exporter is not at the beginning of the list",
+		"none exporter is not at the beginning of the list": {
 			names: []string{"otlp", "none", "prometheus"},
 			assert: func(t *testing.T, err error, readers []metric.Reader) {
 				t.Helper()
@@ -57,19 +53,17 @@ func TestCreateMetricReaders(t *testing.T) {
 				assert.IsType(t, &metric.PeriodicReader{}, readers[0])
 			},
 		},
-		{
-			uc:    "list contains unsupported exporter type",
+		"list contains unsupported exporter type": {
 			names: []string{"otlp", "foobar"},
 			assert: func(t *testing.T, err error, _ []metric.Reader) {
 				t.Helper()
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, ErrUnsupportedMetricExporterType)
-				assert.Contains(t, err.Error(), "foobar")
+				require.ErrorContains(t, err, "foobar")
 			},
 		},
-		{
-			uc:    "fails creating exporter type",
+		"fails creating exporter type": {
 			names: []string{"otlp"},
 			setup: func(t *testing.T) {
 				t.Helper()
@@ -81,13 +75,12 @@ func TestCreateMetricReaders(t *testing.T) {
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, ErrFailedCreatingMetricExporter)
-				assert.Contains(t, err.Error(), "otlp")
+				require.ErrorContains(t, err, "otlp")
 				require.ErrorIs(t, err, ErrUnsupportedOTLPProtocol)
-				assert.Contains(t, err.Error(), "foobar")
+				require.ErrorContains(t, err, "foobar")
 			},
 		},
-		{
-			uc: "default exporter type with error",
+		"default exporter type with error": {
 			setup: func(t *testing.T) {
 				t.Helper()
 				t.Setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "foobar")
@@ -97,11 +90,10 @@ func TestCreateMetricReaders(t *testing.T) {
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, ErrUnsupportedOTLPProtocol)
-				assert.Contains(t, err.Error(), "foobar")
+				require.ErrorContains(t, err, "foobar")
 			},
 		},
-		{
-			uc: "default exporter type",
+		"default exporter type": {
 			assert: func(t *testing.T, err error, readers []metric.Reader) {
 				t.Helper()
 
@@ -110,8 +102,7 @@ func TestCreateMetricReaders(t *testing.T) {
 				assert.IsType(t, &metric.PeriodicReader{}, readers[0])
 			},
 		},
-		{
-			uc:    "all supported exporter types",
+		"all supported exporter types": {
 			names: []string{"otlp", "prometheus"},
 			setup: func(t *testing.T) {
 				t.Helper()
@@ -128,13 +119,13 @@ func TestCreateMetricReaders(t *testing.T) {
 			},
 		},
 	} {
-		t.Run(tc.uc, func(t *testing.T) {
+		t.Run(uc, func(t *testing.T) {
 			// GIVEN
 			setup := x.IfThenElse(tc.setup == nil, func(t *testing.T) { t.Helper() }, tc.setup)
 			setup(t)
 
 			// WHEN
-			readers, err := createMetricsReaders(context.Background(), tc.names...)
+			readers, err := createMetricsReaders(t.Context(), tc.names...)
 
 			// THEN
 			tc.assert(t, err, readers)

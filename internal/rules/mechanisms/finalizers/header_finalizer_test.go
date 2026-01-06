@@ -17,15 +17,17 @@
 package finalizers
 
 import (
-	"context"
 	"testing"
 
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/dadrus/heimdall/internal/app"
 	"github.com/dadrus/heimdall/internal/heimdall"
 	"github.com/dadrus/heimdall/internal/heimdall/mocks"
 	"github.com/dadrus/heimdall/internal/rules/mechanisms/subject"
+	"github.com/dadrus/heimdall/internal/validation"
 	"github.com/dadrus/heimdall/internal/x"
 	"github.com/dadrus/heimdall/internal/x/testsupport"
 )
@@ -33,35 +35,30 @@ import (
 func TestCreateHeaderFinalizer(t *testing.T) {
 	t.Parallel()
 
-	for _, tc := range []struct {
-		uc     string
-		id     string
+	for uc, tc := range map[string]struct {
 		config []byte
 		assert func(t *testing.T, err error, finalizer *headerFinalizer)
 	}{
-		{
-			uc: "without configuration",
+		"without configuration": {
 			assert: func(t *testing.T, err error, _ *headerFinalizer) {
 				t.Helper()
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrConfiguration)
-				assert.Contains(t, err.Error(), "'headers' is a required field")
+				require.ErrorContains(t, err, "'headers' is a required field")
 			},
 		},
-		{
-			uc:     "with empty headers configuration",
+		"with empty headers configuration": {
 			config: []byte(`headers: {}`),
 			assert: func(t *testing.T, err error, _ *headerFinalizer) {
 				t.Helper()
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrConfiguration)
-				assert.Contains(t, err.Error(), "'headers' must contain more than 0 items")
+				require.ErrorContains(t, err, "'headers' must contain more than 0 items")
 			},
 		},
-		{
-			uc: "with unsupported attributes",
+		"with unsupported attributes": {
 			config: []byte(`
 headers:
   foo: bar
@@ -72,11 +69,10 @@ foo: bar
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrConfiguration)
-				assert.Contains(t, err.Error(), "failed decoding")
+				require.ErrorContains(t, err, "failed decoding")
 			},
 		},
-		{
-			uc: "with bad template",
+		"with bad template": {
 			config: []byte(`
 headers:
   bar: "{{ .Subject.ID | foobar }}"
@@ -86,12 +82,10 @@ headers:
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrConfiguration)
-				assert.Contains(t, err.Error(), "failed decoding")
+				require.ErrorContains(t, err, "failed decoding")
 			},
 		},
-		{
-			uc: "with valid config",
-			id: "hun",
+		"with valid config": {
 			config: []byte(`
 headers:
   foo: bar
@@ -101,7 +95,8 @@ headers:
 
 				require.NoError(t, err)
 				assert.Len(t, finalizer.headers, 2)
-				assert.Equal(t, "hun", finalizer.ID())
+				assert.Equal(t, "with valid config", finalizer.ID())
+				assert.Equal(t, finalizer.Name(), finalizer.ID())
 
 				val, err := finalizer.headers["foo"].Render(nil)
 				require.NoError(t, err)
@@ -117,12 +112,20 @@ headers:
 			},
 		},
 	} {
-		t.Run("case="+tc.uc, func(t *testing.T) {
+		t.Run(uc, func(t *testing.T) {
+			// GIVEN
 			conf, err := testsupport.DecodeTestConfig(tc.config)
 			require.NoError(t, err)
 
+			validator, err := validation.NewValidator()
+			require.NoError(t, err)
+
+			appCtx := app.NewContextMock(t)
+			appCtx.EXPECT().Validator().Maybe().Return(validator)
+			appCtx.EXPECT().Logger().Return(log.Logger)
+
 			// WHEN
-			finalizer, err := newHeaderFinalizer(tc.id, conf)
+			finalizer, err := newHeaderFinalizer(appCtx, uc, conf)
 
 			// THEN
 			tc.assert(t, err, finalizer)
@@ -133,16 +136,13 @@ headers:
 func TestCreateHeaderFinalizerFromPrototype(t *testing.T) {
 	t.Parallel()
 
-	for _, tc := range []struct {
-		uc              string
-		id              string
+	for uc, tc := range map[string]struct {
 		prototypeConfig []byte
 		config          []byte
+		stepID          string
 		assert          func(t *testing.T, err error, prototype *headerFinalizer, configured *headerFinalizer)
 	}{
-		{
-			uc: "no new configuration provided",
-			id: "hun1",
+		"no new configuration and no step ID": {
 			prototypeConfig: []byte(`
 headers:
   foo: bar
@@ -152,28 +152,27 @@ headers:
 
 				require.NoError(t, err)
 				assert.Equal(t, prototype, configured)
-				assert.Equal(t, "hun1", configured.ID())
 			},
 		},
-		{
-			uc: "configuration without headers provided",
-			id: "hun2",
+		"no new configuration but with step ID": {
 			prototypeConfig: []byte(`
 headers:
   foo: bar
 `),
-			config: []byte(``),
+			stepID: "foo",
 			assert: func(t *testing.T, err error, prototype *headerFinalizer, configured *headerFinalizer) {
 				t.Helper()
 
 				require.NoError(t, err)
-				assert.Equal(t, prototype, configured)
-				assert.Equal(t, "hun2", configured.ID())
+				assert.NotEqual(t, prototype, configured)
+				assert.Equal(t, "foo", configured.ID())
+				assert.Equal(t, prototype.Name(), configured.Name())
+				assert.Equal(t, "no new configuration but with step ID", prototype.ID())
+				assert.Equal(t, prototype.app, configured.app)
+				assert.Equal(t, prototype.headers, configured.headers)
 			},
 		},
-		{
-			uc: "new headers provided",
-			id: "hun3",
+		"new headers provided": {
 			prototypeConfig: []byte(`
 headers:
   foo: bar
@@ -189,7 +188,7 @@ headers:
 				assert.NotEqual(t, prototype, configured)
 				require.NotNil(t, configured)
 				assert.NotEmpty(t, configured.headers)
-				assert.Equal(t, "hun3", configured.ID())
+				assert.Equal(t, "new headers provided", configured.ID())
 				assert.Equal(t, prototype.ID(), configured.ID())
 
 				val, err := configured.headers["bar"].Render(nil)
@@ -200,23 +199,87 @@ headers:
 				assert.False(t, configured.ContinueOnError())
 			},
 		},
+		"new headers and step id": {
+			prototypeConfig: []byte(`
+headers:
+  foo: bar
+`),
+			config: []byte(`
+headers:
+  bar: foo
+`),
+			stepID: "bar",
+			assert: func(t *testing.T, err error, prototype *headerFinalizer, configured *headerFinalizer) {
+				t.Helper()
+
+				require.NoError(t, err)
+				assert.NotEqual(t, prototype, configured)
+				require.NotNil(t, configured)
+				assert.NotEmpty(t, configured.headers)
+				assert.Equal(t, "bar", configured.ID())
+				assert.NotEqual(t, prototype.ID(), configured.ID())
+				assert.Equal(t, prototype.Name(), configured.Name())
+
+				val, err := configured.headers["bar"].Render(nil)
+				require.NoError(t, err)
+				assert.Equal(t, "foo", val)
+
+				assert.False(t, prototype.ContinueOnError())
+				assert.False(t, configured.ContinueOnError())
+			},
+		},
+		"with unsupported attributes": {
+			prototypeConfig: []byte(`
+headers:
+  foo: bar
+`),
+			config: []byte(`
+headers:
+  bar: foo
+foo: bar
+`),
+			assert: func(t *testing.T, err error, prototype *headerFinalizer, _ *headerFinalizer) {
+				t.Helper()
+
+				assert.NotNil(t, prototype)
+
+				require.Error(t, err)
+				require.ErrorIs(t, err, heimdall.ErrConfiguration)
+				require.ErrorContains(t, err, "failed decoding")
+			},
+		},
 	} {
-		t.Run("case="+tc.uc, func(t *testing.T) {
+		t.Run(uc, func(t *testing.T) {
+			// GIVEN
 			pc, err := testsupport.DecodeTestConfig(tc.prototypeConfig)
 			require.NoError(t, err)
 
 			conf, err := testsupport.DecodeTestConfig(tc.config)
 			require.NoError(t, err)
 
-			prototype, err := newHeaderFinalizer(tc.id, pc)
+			validator, err := validation.NewValidator()
+			require.NoError(t, err)
+
+			appCtx := app.NewContextMock(t)
+			appCtx.EXPECT().Validator().Maybe().Return(validator)
+			appCtx.EXPECT().Logger().Return(log.Logger)
+
+			prototype, err := newHeaderFinalizer(appCtx, uc, pc)
 			require.NoError(t, err)
 
 			// WHEN
-			finalizer, err := prototype.WithConfig(conf)
+			finalizer, err := prototype.WithConfig(tc.stepID, conf)
 
 			// THEN
-			realFinalizer, ok := finalizer.(*headerFinalizer)
-			require.True(t, ok)
+			var (
+				realFinalizer *headerFinalizer
+				ok            bool
+			)
+
+			if err == nil {
+				realFinalizer, ok = finalizer.(*headerFinalizer)
+				require.True(t, ok)
+			}
 
 			tc.assert(t, err, prototype, realFinalizer)
 		})
@@ -226,44 +289,48 @@ headers:
 func TestHeaderFinalizerExecute(t *testing.T) {
 	t.Parallel()
 
-	for _, tc := range []struct {
-		uc               string
-		id               string
+	for uc, tc := range map[string]struct {
 		config           []byte
-		configureContext func(t *testing.T, ctx *mocks.ContextMock)
-		createSubject    func(t *testing.T) *subject.Subject
+		subject          *subject.Subject
+		configureContext func(t *testing.T, ctx *mocks.RequestContextMock)
 		assert           func(t *testing.T, err error)
 	}{
-		{
-			uc: "with nil subject",
-			id: "hun1",
+		"template rendering error": {
 			config: []byte(`
 headers:
-  foo: bar
-  bar: "{{ .Subject.ID }}"
+  X-Baz: '{{ .Request.Foo "X-Foo" }}'
 `),
+			configureContext: func(t *testing.T, ctx *mocks.RequestContextMock) {
+				t.Helper()
+
+				reqf := mocks.NewRequestFunctionsMock(t)
+
+				ctx.EXPECT().Request().Return(&heimdall.Request{RequestFunctions: reqf})
+				ctx.EXPECT().Outputs().Return(map[string]any{"foo": "bar"})
+			},
+			subject: &subject.Subject{ID: "FooBar", Attributes: map[string]any{}},
 			assert: func(t *testing.T, err error) {
 				t.Helper()
 
 				require.Error(t, err)
 				require.ErrorIs(t, err, heimdall.ErrInternal)
-				assert.Contains(t, err.Error(), "'nil' subject")
+				require.ErrorContains(t, err, "failed to render value for 'X-Baz' header")
 
 				var identifier interface{ ID() string }
 				require.ErrorAs(t, err, &identifier)
-				assert.Equal(t, "hun1", identifier.ID())
+				assert.Equal(t, "template rendering error", identifier.ID())
 			},
 		},
-		{
-			uc: "with all preconditions satisfied",
+		"with all preconditions satisfied": {
 			config: []byte(`
 headers:
   foo: "{{ .Subject.Attributes.bar }}"
   bar: "{{ .Subject.ID }}"
   baz: bar
   X-Baz: '{{ .Request.Header "X-Foo" }}'
+  X-Foo: '{{ .Outputs.foo }}'
 `),
-			configureContext: func(t *testing.T, ctx *mocks.ContextMock) {
+			configureContext: func(t *testing.T, ctx *mocks.RequestContextMock) {
 				t.Helper()
 
 				reqf := mocks.NewRequestFunctionsMock(t)
@@ -273,13 +340,36 @@ headers:
 				ctx.EXPECT().AddHeaderForUpstream("bar", "FooBar")
 				ctx.EXPECT().AddHeaderForUpstream("baz", "bar")
 				ctx.EXPECT().AddHeaderForUpstream("X-Baz", "Bar")
+				ctx.EXPECT().AddHeaderForUpstream("X-Foo", "bar")
 				ctx.EXPECT().Request().Return(&heimdall.Request{RequestFunctions: reqf})
+				ctx.EXPECT().Outputs().Return(map[string]any{"foo": "bar"})
 			},
-			createSubject: func(t *testing.T) *subject.Subject {
+			subject: &subject.Subject{ID: "FooBar", Attributes: map[string]any{"bar": "baz"}},
+			assert: func(t *testing.T, err error) {
 				t.Helper()
 
-				return &subject.Subject{ID: "FooBar", Attributes: map[string]any{"bar": "baz"}}
+				require.NoError(t, err)
 			},
+		},
+		"support multiple headers with same name using newlines": {
+			config: []byte(`
+headers:
+  Impersonation-Group: |
+    {{- range .Subject.Attributes.groups }}
+    {{ . }}
+    {{- end }}
+`),
+			configureContext: func(t *testing.T, ctx *mocks.RequestContextMock) {
+				t.Helper()
+
+				ctx.EXPECT().AddHeaderForUpstream("Impersonation-Group", "group1")
+				ctx.EXPECT().AddHeaderForUpstream("Impersonation-Group", "group2")
+				ctx.EXPECT().AddHeaderForUpstream("Impersonation-Group", "group3")
+
+				ctx.EXPECT().Request().Return(&heimdall.Request{})
+				ctx.EXPECT().Outputs().Return(map[string]any{})
+			},
+			subject: &subject.Subject{Attributes: map[string]any{"groups": []string{"group1", "group2", "group3"}}},
 			assert: func(t *testing.T, err error) {
 				t.Helper()
 
@@ -287,35 +377,32 @@ headers:
 			},
 		},
 	} {
-		t.Run("case="+tc.uc, func(t *testing.T) {
+		t.Run(uc, func(t *testing.T) {
 			// GIVEN
-			createSubject := x.IfThenElse(tc.createSubject != nil,
-				tc.createSubject,
-				func(t *testing.T) *subject.Subject {
-					t.Helper()
-
-					return nil
-				})
-
 			configureContext := x.IfThenElse(tc.configureContext != nil,
 				tc.configureContext,
-				func(t *testing.T, _ *mocks.ContextMock) { t.Helper() })
+				func(t *testing.T, _ *mocks.RequestContextMock) { t.Helper() })
 
 			conf, err := testsupport.DecodeTestConfig(tc.config)
 			require.NoError(t, err)
 
-			ctx := mocks.NewContextMock(t)
-			ctx.EXPECT().AppContext().Return(context.Background()).Maybe()
-
-			sub := createSubject(t)
+			ctx := mocks.NewRequestContextMock(t)
+			ctx.EXPECT().Context().Return(t.Context()).Maybe()
 
 			configureContext(t, ctx)
 
-			finalizer, err := newHeaderFinalizer(tc.id, conf)
+			validator, err := validation.NewValidator()
+			require.NoError(t, err)
+
+			appCtx := app.NewContextMock(t)
+			appCtx.EXPECT().Validator().Maybe().Return(validator)
+			appCtx.EXPECT().Logger().Return(log.Logger)
+
+			finalizer, err := newHeaderFinalizer(appCtx, uc, conf)
 			require.NoError(t, err)
 
 			// WHEN
-			err = finalizer.Execute(ctx, sub)
+			err = finalizer.Execute(ctx, tc.subject)
 
 			// THEN
 			tc.assert(t, err)

@@ -35,7 +35,7 @@ import (
 
 	"github.com/dadrus/heimdall/internal/config"
 	"github.com/dadrus/heimdall/internal/handler/listener"
-	"github.com/dadrus/heimdall/internal/heimdall/mocks"
+	"github.com/dadrus/heimdall/internal/keyholder/mocks"
 	"github.com/dadrus/heimdall/internal/keystore"
 	"github.com/dadrus/heimdall/internal/x/pkix/pemx"
 	"github.com/dadrus/heimdall/internal/x/testsupport"
@@ -43,15 +43,16 @@ import (
 
 type ServiceTestSuite struct {
 	suite.Suite
+
 	rootCA1 *testsupport.CA
 	intCA1  *testsupport.CA
 	ee1     *testsupport.EndEntity
 	ee2     *testsupport.EndEntity
 
-	srv    *http.Server
-	ks     keystore.KeyStore
-	signer *mocks.JWTSignerMock
-	addr   string
+	srv  *http.Server
+	ks   keystore.KeyStore
+	addr string
+	khr  *mocks.RegistryMock
 }
 
 func (suite *ServiceTestSuite) SetupSuite() {
@@ -113,22 +114,20 @@ func (suite *ServiceTestSuite) SetupTest() {
 	suite.Require().NoError(err)
 
 	conf := &config.Configuration{
-		Serve: config.ServeConfig{
-			Management: config.ServiceConfig{
-				Host: "127.0.0.1",
-				Port: port,
-				CORS: &config.CORS{},
-			},
+		Management: config.ManagementConfig{
+			Host: "127.0.0.1",
+			Port: port,
+			CORS: &config.CORS{},
 		},
 		Metrics: config.MetricsConfig{Enabled: true},
 	}
 
-	listener, err := listener.New("tcp", conf.Serve.Management.Address(), conf.Serve.Management.TLS, nil)
+	listener, err := listener.New(suite.T().Context(), "test", conf.Management.Address(), conf.Management.TLS, nil, nil)
 	suite.Require().NoError(err)
 	suite.addr = "http://" + listener.Addr().String()
 
-	suite.signer = mocks.NewJWTSignerMock(suite.T())
-	suite.srv = newService(conf, log.Logger, suite.signer)
+	suite.khr = mocks.NewRegistryMock(suite.T())
+	suite.srv = newService(conf, log.Logger, suite.khr)
 
 	go func() {
 		suite.srv.Serve(listener)
@@ -152,11 +151,11 @@ func (suite *ServiceTestSuite) TestJWKSRequestWithoutEtagUsage() {
 		keys[idx] = entry.JWK()
 	}
 
-	suite.signer.EXPECT().Keys().Return(keys)
+	suite.khr.EXPECT().Keys().Return(keys)
 
 	// WHEN
 	client := &http.Client{Transport: &http.Transport{}}
-	req, err := http.NewRequestWithContext(context.TODO(), http.MethodGet, suite.addr+"/.well-known/jwks", nil)
+	req, err := http.NewRequestWithContext(suite.T().Context(), http.MethodGet, suite.addr+"/.well-known/jwks", nil)
 	suite.Require().NoError(err)
 
 	resp, err := client.Do(req)
@@ -216,10 +215,10 @@ func (suite *ServiceTestSuite) TestJWKSRequestWithEtagUsage() {
 		keys[idx] = entry.JWK()
 	}
 
-	suite.signer.EXPECT().Keys().Return(keys)
+	suite.khr.EXPECT().Keys().Return(keys)
 
 	client := &http.Client{Transport: &http.Transport{}}
-	req, err := http.NewRequestWithContext(context.TODO(), http.MethodGet, suite.addr+"/.well-known/jwks", nil)
+	req, err := http.NewRequestWithContext(suite.T().Context(), http.MethodGet, suite.addr+"/.well-known/jwks", nil)
 	suite.Require().NoError(err)
 
 	resp1, err := client.Do(req)
@@ -232,7 +231,7 @@ func (suite *ServiceTestSuite) TestJWKSRequestWithEtagUsage() {
 	etagValue := resp1.Header.Get("ETag")
 	suite.Require().NotEmpty(etagValue)
 
-	req, err = http.NewRequestWithContext(context.TODO(), http.MethodGet, suite.addr+"/.well-known/jwks", nil)
+	req, err = http.NewRequestWithContext(suite.T().Context(), http.MethodGet, suite.addr+"/.well-known/jwks", nil)
 	suite.Require().NoError(err)
 	req.Header.Set("If-None-Match", etagValue)
 
@@ -251,7 +250,7 @@ func (suite *ServiceTestSuite) TestJWKSRequestWithEtagUsage() {
 func (suite *ServiceTestSuite) TestHealthRequest() {
 	// GIVEN
 	client := &http.Client{Transport: &http.Transport{}}
-	req, err := http.NewRequestWithContext(context.TODO(), http.MethodGet, suite.addr+"/.well-known/health", nil)
+	req, err := http.NewRequestWithContext(suite.T().Context(), http.MethodGet, suite.addr+"/.well-known/health", nil)
 	suite.Require().NoError(err)
 
 	// WHEN

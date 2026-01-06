@@ -17,7 +17,6 @@
 package otelmetrics
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -43,14 +42,12 @@ func attributeValue(set attribute.Set, key attribute.Key) attribute.Value {
 func TestHandlerExecution(t *testing.T) {
 	t.Parallel()
 
-	for _, tc := range []struct {
-		uc     string
+	for uc, tc := range map[string]struct {
 		path   string
 		method string
 		assert func(t *testing.T, rm *metricdata.ResourceMetrics)
 	}{
-		{
-			uc:     "metrics for filtered request",
+		"metrics for filtered request": {
 			path:   "/filtered",
 			method: http.MethodGet,
 			assert: func(t *testing.T, rm *metricdata.ResourceMetrics) {
@@ -59,8 +56,7 @@ func TestHandlerExecution(t *testing.T) {
 				assert.Empty(t, rm.ScopeMetrics)
 			},
 		},
-		{
-			uc:     "metrics for successful request",
+		"metrics for successful request": {
 			path:   "/test",
 			method: http.MethodGet,
 			assert: func(t *testing.T, rm *metricdata.ResourceMetrics) {
@@ -82,24 +78,26 @@ func TestHandlerExecution(t *testing.T) {
 				assert.False(t, activeRequests.IsMonotonic)
 				require.Len(t, activeRequests.DataPoints, 1)
 				require.InDelta(t, float64(0), activeRequests.DataPoints[0].Value, 0.00)
-				require.Equal(t, 7, activeRequests.DataPoints[0].Attributes.Len())
+				require.Equal(t, 8, activeRequests.DataPoints[0].Attributes.Len())
 				assert.Equal(t, "foobar",
 					attributeValue(activeRequests.DataPoints[0].Attributes, "service.subsystem").AsString())
 				assert.Equal(t, "zab",
 					attributeValue(activeRequests.DataPoints[0].Attributes, "baz").AsString())
-				assert.Equal(t, "1.1",
-					attributeValue(activeRequests.DataPoints[0].Attributes, "http.flavor").AsString())
-				assert.Equal(t, http.MethodGet,
-					attributeValue(activeRequests.DataPoints[0].Attributes, "http.method").AsString())
 				assert.Equal(t, "http",
-					attributeValue(activeRequests.DataPoints[0].Attributes, "http.scheme").AsString())
+					attributeValue(activeRequests.DataPoints[0].Attributes, "network.protocol.name").AsString())
+				assert.Equal(t, "1.1",
+					attributeValue(activeRequests.DataPoints[0].Attributes, "network.protocol.version").AsString())
+				assert.Equal(t, http.MethodGet,
+					attributeValue(activeRequests.DataPoints[0].Attributes, "http.request.method").AsString())
+				assert.Equal(t, "http",
+					attributeValue(activeRequests.DataPoints[0].Attributes, "url.scheme").AsString())
 				assert.Equal(t, "127.0.0.1",
-					attributeValue(activeRequests.DataPoints[0].Attributes, "net.host.name").AsString())
-				assert.True(t, activeRequests.DataPoints[0].Attributes.HasValue("net.host.port"))
+					attributeValue(activeRequests.DataPoints[0].Attributes, "server.address").AsString())
+				assert.True(t, activeRequests.DataPoints[0].Attributes.HasValue("server.port"))
 			},
 		},
 	} {
-		t.Run(tc.uc, func(t *testing.T) {
+		t.Run(uc, func(t *testing.T) {
 			// GIVEN
 			exp := metric.NewManualReader()
 
@@ -131,7 +129,7 @@ func TestHandlerExecution(t *testing.T) {
 			defer srv.Close()
 
 			req, err := http.NewRequestWithContext(
-				context.Background(),
+				t.Context(),
 				tc.method,
 				fmt.Sprintf("%s%s", srv.URL, tc.path),
 				nil,
@@ -146,7 +144,7 @@ func TestHandlerExecution(t *testing.T) {
 
 			var rm metricdata.ResourceMetrics
 
-			err = exp.Collect(context.TODO(), &rm)
+			err = exp.Collect(t.Context(), &rm)
 			require.NoError(t, err)
 
 			// THEN

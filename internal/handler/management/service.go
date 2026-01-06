@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/ccoveille/go-safecast"
 	"github.com/justinas/alice"
 	"github.com/rs/cors"
 	"github.com/rs/zerolog"
@@ -34,7 +35,7 @@ import (
 	"github.com/dadrus/heimdall/internal/handler/middleware/http/otelmetrics"
 	"github.com/dadrus/heimdall/internal/handler/middleware/http/passthrough"
 	"github.com/dadrus/heimdall/internal/handler/middleware/http/recovery"
-	"github.com/dadrus/heimdall/internal/heimdall"
+	"github.com/dadrus/heimdall/internal/keyholder"
 	"github.com/dadrus/heimdall/internal/x"
 	"github.com/dadrus/heimdall/internal/x/httpx"
 	"github.com/dadrus/heimdall/internal/x/loggeradapter"
@@ -43,16 +44,13 @@ import (
 func newService(
 	conf *config.Configuration,
 	log zerolog.Logger,
-	signer heimdall.JWTSigner,
+	khr keyholder.Registry,
 ) *http.Server {
-	cfg := conf.Serve.Management
+	cfg := conf.Management
 	eh := errorhandler2.New()
 	opFilter := func(req *http.Request) bool { return req.URL.Path != EndpointHealth }
 
 	hc := alice.New(
-		accesslog.New(log),
-		logger.New(log),
-		dump.New(),
 		recovery.New(eh),
 		otelhttp.NewMiddleware("",
 			otelhttp.WithServerName(cfg.Address()),
@@ -67,6 +65,9 @@ func newService(
 			otelmetrics.WithServerName(cfg.Address()),
 			otelmetrics.WithOperationFilter(opFilter),
 		),
+		accesslog.New(log),
+		logger.New(log),
+		dump.New(),
 		x.IfThenElseExec(cfg.CORS != nil,
 			func() func(http.Handler) http.Handler {
 				return cors.New(
@@ -82,14 +83,14 @@ func newService(
 			},
 			func() func(http.Handler) http.Handler { return passthrough.New },
 		),
-	).Then(newManagementHandler(signer, eh))
+	).Then(newManagementHandler(khr, eh))
 
 	return &http.Server{
 		Handler:        hc,
 		ReadTimeout:    cfg.Timeout.Read,
 		WriteTimeout:   cfg.Timeout.Write,
 		IdleTimeout:    cfg.Timeout.Idle,
-		MaxHeaderBytes: int(cfg.BufferLimit.Read),
+		MaxHeaderBytes: safecast.MustConvert[int](uint64(cfg.BufferLimit.Read)),
 		ErrorLog:       loggeradapter.NewStdLogger(log),
 	}
 }
